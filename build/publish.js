@@ -42,10 +42,13 @@ const H = {
   'User-Agent': 'novel-studio-publisher'
 };
 
+/** 任何输出前先把 token 抹掉，避免它出现在日志/报错里 */
+const redact = (s) => String(s == null ? '' : s).split(TOKEN).join('***');
+
 function git(args, opts = {}) {
   const r = spawnSync(GIT, args, { cwd: ROOT, encoding: 'utf8', ...opts });
   if (r.status !== 0) {
-    throw new Error(`git ${args.join(' ')} 失败：\n${(r.stderr || r.stdout || '').trim()}`);
+    throw new Error(`git ${args.map(redact).join(' ')} 失败：\n${redact(r.stderr || r.stdout).trim()}`);
   }
   return (r.stdout || '').trim();
 }
@@ -214,6 +217,6 @@ async function api(method, url, body) {
 
   console.log(`\n全部完成：${release.html_url}`);
 })().catch((e) => {
-  console.error('\n发布失败：', e.message);
+  console.error('\n发布失败：', redact(e.message));
   process.exit(1);
 });

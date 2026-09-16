@@ -244,6 +244,10 @@ novel-studio/
 
 两个数据目录完全独立，备份时按需拷贝即可——写作端的 `data-work/store.json` 是你唯一不能丢的东西。
 
+## 更新日志
+
+版本变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 开源协议
 
 [MIT](LICENSE)

@@ -143,36 +143,40 @@ async function api(method, url, body) {
     return;
   }
 
-  // 5) 创建 Release
+  // 5) 创建 Release（说明文字 = 固定头部 + CHANGELOG 对应版本段落）
   console.log('\n== 5. 创建 Release ==');
+  const changelogPath = path.join(ROOT, 'CHANGELOG.md');
+  const changelog = fs.existsSync(changelogPath)
+    ? fs.readFileSync(changelogPath, 'utf8').trim()
+    : `## v${version}\n\n- 详见仓库 CHANGELOG.md`;
+  const releaseBody = [
+    `## 小说创作工作台 v${version}`,
+    '',
+    '本地运行的小说辅助创作工具：**零依赖、无需构建**，数据全部留在本机。',
+    '',
+    '### 下载安装',
+    '- 见下方 Assets 中的 `小说创作工作台-安装包-' + version + '-setup.exe`（约 106 MB）',
+    '- 双击安装，按用户安装、不需要管理员权限；数据存 `%APPDATA%\\小说创作工作台\\data\\`',
+    '- **覆盖升级不丢数据**：旧版本装的数据会原样保留',
+    '',
+    '### 更新日志',
+    '',
+    changelog,
+    '',
+    '### 从源码运行',
+    '```bash',
+    'node server/index.js 5367            # 写作端',
+    'node server/index.js 5368 --data=.demo --seed   # 展示端',
+    '```',
+    '',
+    '完整功能说明见 [docs/功能解析.md](docs/功能解析.md)。',
+    '',
+    'MIT License.'
+  ].join('\n');
   let rel = await api('POST', `/repos/${owner}/${REPO}/releases`, {
     tag_name: tag,
     name: `${tag} · 小说创作工作台`,
-    body: [
-      '## 小说创作工作台 v' + version,
-      '',
-      '本地运行的小说辅助创作工具：**零依赖、无需构建**，数据全部留在本机。',
-      '',
-      '### 亮点',
-      '- 九个模块（总览 / 大纲 / 角色集 / 线路 / 章节 / 设定 / 伏笔 / 备忘 / 素材箱），靠"关联"串成一体',
-      '- AI 助手 14 个工具，可直接改写大纲、补节拍、建角色；支持原生 function calling / JSON 协议 / 演示模式三重降级',
-      '- 小说 TXT 批量导入（最多 20 个）：自动分章，可各自归档或合并为一本（每文件一卷），逐本进度 + 失败重试',
-      '- Windows 桌面安装包：目标电脑无需 Node、无需浏览器',
-      '',
-      '### 下载',
-      '- 见下方 Assets 中的 `小说创作工作台-安装包-' + version + '-setup.exe`（约 106 MB）',
-      '- 双击安装，按用户安装、不需要管理员权限；数据存 `%APPDATA%\\小说创作工作台\\data\\`',
-      '',
-      '### 从源码运行',
-      '```bash',
-      'node server/index.js 5367            # 写作端',
-      'node server/index.js 5368 --data=.demo --seed   # 展示端',
-      '```',
-      '',
-      '完整功能说明见 [docs/功能解析.md](docs/功能解析.md)。',
-      '',
-      'MIT License.'
-    ].join('\n')
+    body: releaseBody
   });
   if (rel.status === 201) console.log(`  ✓ Release 已创建：${rel.json.html_url}`);
   else if (rel.status === 422) {
@@ -235,6 +239,27 @@ async function api(method, url, body) {
         console.log(' 完成');
       }
     }
+  }
+
+  // 7) 顺手修正历史 Release 的乱码附件名（中文经 URL query 被损坏，如「-.-1.0.0-setup.exe」）
+  console.log('\n== 7. 检查历史 Release 附件名 ==');
+  const rels = await api('GET', `/repos/${owner}/${REPO}/releases?per_page=20`);
+  if (rels.status === 200 && Array.isArray(rels.json)) {
+    let fixedCount = 0;
+    for (const r of rels.json) {
+      for (const a of r.assets || []) {
+        // 正常名以「小说」开头；被损坏的名字会以符号开头（如「-.-」）
+        if (/^[\x21-\x2F]/.test(a.name) && /([\d.]+)-setup\.exe$/.test(a.name)) {
+          const proper = `小说创作工作台-安装包-${a.name.match(/([\d.]+)-setup\.exe$/)[1]}-setup.exe`;
+          const fixed = await api('PATCH', `/repos/${owner}/${REPO}/releases/assets/${a.id}`, { name: proper });
+          if (fixed.status === 200) { console.log(`  ✓ ${r.tag_name}: ${a.name} → ${proper}`); fixedCount++; }
+          else console.log(`  ! ${r.tag_name}: 修正 ${a.name} 失败（HTTP ${fixed.status}）`);
+        }
+      }
+    }
+    if (!fixedCount) console.log('  · 历史附件名都正常');
+  } else {
+    console.log('  · 跳过（无法列出 Release）');
   }
 
   console.log(`\n全部完成：${release.html_url}`);

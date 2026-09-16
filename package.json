@@ -13,7 +13,8 @@
     "dist": "electron-builder --win nsis",
     "icon": "node build/make-icon.js",
     "smoke": "node build/smoke_embedded.js",
-    "smoke:packaged": "node build/smoke_packaged.js"
+    "smoke:packaged": "node build/smoke_packaged.js",
+    "release": "node build/publish.js"
   },
   "engines": {
     "node": ">=18"

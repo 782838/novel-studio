@@ -155,9 +155,10 @@ async function api(method, url, body) {
     '本地运行的小说辅助创作工具：**零依赖、无需构建**，数据全部留在本机。',
     '',
     '### 下载安装',
-    '- 见下方 Assets 中的 `小说创作工作台-安装包-' + version + '-setup.exe`（约 106 MB）',
+    '- 见下方 Assets 中的 `novel-studio-setup-' + version + '.exe`（约 106 MB）',
     '- 双击安装，按用户安装、不需要管理员权限；数据存 `%APPDATA%\\小说创作工作台\\data\\`',
     '- **覆盖升级不丢数据**：旧版本装的数据会原样保留',
+    '- 注：GitHub API 会把非 ASCII 附件名损坏成乱码，故安装包统一用英文文件名发布',
     '',
     '### 更新日志',
     '',
@@ -190,35 +191,40 @@ async function api(method, url, body) {
   const release = rel.json;
 
   // 6) 上传安装包
+  // 坑（已实测）：GitHub API 会把附件名里的非 ASCII 字符规范化成乱码——
+  // 「小说创作工作台-安装包-1.1.1-setup.exe」无论走 URL query 还是 JSON body（含 \uXXXX 转义），
+  // 都会被存成「-.-1.1.1-setup.exe」。这是 GitHub 服务端行为，绕不过。
+  // 所以公开发布名统一用纯 ASCII：novel-studio-setup-<版本>.exe；本地 dist 里的中文文件名不受影响。
   const distDir = path.join(ROOT, 'dist');
-  const assets = fs.existsSync(distDir)
+  const localExes = fs.existsSync(distDir)
     ? fs.readdirSync(distDir).filter((f) => f.endsWith('.exe'))
     : [];
-  if (!assets.length) {
+  const publicNameOf = (local) => {
+    const m = local.match(/([\d.]+)-setup\.exe$/);
+    return m ? `novel-studio-setup-${m[1]}.exe` : local.replace(/[^\x20-\x7E]/g, '_');
+  };
+  if (!localExes.length) {
     console.log('\n== 6. 上传安装包 ==');
     console.log('  · dist 下没有 .exe，跳过（可先运行 npm run dist）');
   } else {
     console.log('\n== 6. 上传安装包 ==');
-    for (const name of assets) {
-      const full = path.join(distDir, name);
+    for (const local of localExes) {
+      const full = path.join(distDir, local);
       const size = fs.statSync(full).size;
+      const publicName = publicNameOf(local);
       const live = release.assets || [];
-      if (live.some((a) => a.name === name)) { console.log(`  · ${name} 已存在，跳过`); continue; }
+      if (live.some((a) => a.name === publicName)) { console.log(`  · ${publicName} 已存在，跳过`); continue; }
       // 之前上传过但名字被损坏的（大小一致）→ 只改名，不重复上传
-      const mangled = live.find((a) => a.size === size && a.name !== name);
+      const mangled = live.find((a) => a.size === size && a.name !== publicName);
       if (mangled) {
-        const fixed = await api('PATCH', `/repos/${owner}/${REPO}/releases/assets/${mangled.id}`, { name });
-        if (fixed.status === 200 && fixed.json && fixed.json.name === name) console.log(`  · 已修正附件名：${mangled.name} → ${name}`);
+        const fixed = await api('PATCH', `/repos/${owner}/${REPO}/releases/assets/${mangled.id}`, { name: publicName });
+        if (fixed.status === 200 && fixed.json && fixed.json.name === publicName) console.log(`  · 已修正附件名：${mangled.name} → ${publicName}`);
         else console.log(`  ! 修正附件名失败，仍是 ${mangled.name}`);
         continue;
       }
-      // 坑：附件名要走 URL query，中文在这条链路上会被损坏
-      // （实测「小说创作工作台-安装包-1.0.0-setup.exe」被存成了「-.-1.0.0-setup.exe」）。
-      // 所以先用纯 ASCII 名上传，拿到 asset id 后再用 JSON body PATCH 回真正的中文名。
-      const ascii = name.replace(/[^\x20-\x7E]/g, '_');
-      process.stdout.write(`  上传 ${name}（${(size / 1048576).toFixed(1)} MB）…`);
+      process.stdout.write(`  上传 ${local} → ${publicName}（${(size / 1048576).toFixed(1)} MB）…`);
       const up = await fetch(
-        `https://uploads.github.com/repos/${owner}/${REPO}/releases/${release.id}/assets?name=${encodeURIComponent(ascii)}`,
+        `https://uploads.github.com/repos/${owner}/${REPO}/releases/${release.id}/assets?name=${encodeURIComponent(publicName)}`,
         {
           method: 'POST',
           headers: { ...H, 'Content-Type': 'application/octet-stream', 'Content-Length': String(size) },
@@ -231,28 +237,24 @@ async function api(method, url, body) {
         continue;
       }
       const asset = await up.json();
-      if (asset.name !== name) {
-        const fixed = await api('PATCH', `/repos/${owner}/${REPO}/releases/assets/${asset.id}`, { name });
-        if (fixed.status === 200 && fixed.json && fixed.json.name === name) console.log(' 完成（已改回原名）');
-        else console.log(` 完成，但附件名仍是 ${asset.name}`);
-      } else {
-        console.log(' 完成');
-      }
+      if (asset.name === publicName) console.log(' 完成');
+      else console.log(` 完成，但附件名被 GitHub 存成了 ${asset.name}`);
     }
   }
 
-  // 7) 顺手修正历史 Release 的乱码附件名（中文经 URL query 被损坏，如「-.-1.0.0-setup.exe」）
+  // 7) 顺手修正历史 Release 的乱码附件名（GitHub API 会把非 ASCII 名存成乱码，如「-.-1.0.0-setup.exe」）
   console.log('\n== 7. 检查历史 Release 附件名 ==');
   const rels = await api('GET', `/repos/${owner}/${REPO}/releases?per_page=20`);
   if (rels.status === 200 && Array.isArray(rels.json)) {
     let fixedCount = 0;
     for (const r of rels.json) {
       for (const a of r.assets || []) {
-        // 正常名以「小说」开头；被损坏的名字会以符号开头（如「-.-」）
-        if (/^[\x21-\x2F]/.test(a.name) && /([\d.]+)-setup\.exe$/.test(a.name)) {
-          const proper = `小说创作工作台-安装包-${a.name.match(/([\d.]+)-setup\.exe$/)[1]}-setup.exe`;
+        const m = a.name.match(/([\d.]+)-setup\.exe$/) || a.name.match(/setup-([\d.]+)\.exe$/);
+        const ver = m && m[1];
+        const proper = ver ? `novel-studio-setup-${ver}.exe` : null;
+        if (proper && a.name !== proper) {
           const fixed = await api('PATCH', `/repos/${owner}/${REPO}/releases/assets/${a.id}`, { name: proper });
-          if (fixed.status === 200) { console.log(`  ✓ ${r.tag_name}: ${a.name} → ${proper}`); fixedCount++; }
+          if (fixed.status === 200 && fixed.json && fixed.json.name === proper) { console.log(`  ✓ ${r.tag_name}: ${a.name} → ${proper}`); fixedCount++; }
           else console.log(`  ! ${r.tag_name}: 修正 ${a.name} 失败（HTTP ${fixed.status}）`);
         }
       }

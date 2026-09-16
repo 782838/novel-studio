@@ -4,7 +4,7 @@
 
 ![总览](docs/images/view-dashboard.png)
 
-九个模块（总览 / 大纲 / 角色集 / 线路 / 章节 / 设定 / 伏笔 / 备忘 / 素材箱）通过"关联"串成一体；AI 助手有 13 个工具，能真的替你改写大纲、补节拍、建角色。
+九个模块（总览 / 大纲 / 角色集 / 线路 / 章节 / 设定 / 伏笔 / 备忘 / 素材箱）通过"关联"串成一体；AI 助手有 14 个工具，能真的替你改写大纲、补节拍、建角色。
 
 > **完整功能解析（每个模块的截图与说明）见 [docs/功能解析.md](docs/功能解析.md)。**
 
@@ -221,21 +221,30 @@ GLM-5.3 / 5.3-Flash **思考无法关闭**，每次调用都会产出思考 toke
 
 ```
 novel-studio/
-├─ server/
-│  ├─ index.js      零依赖 HTTP 服务 + REST 路由 + Markdown 导出 + 多实例启动参数
-│  ├─ store.js      JSON 持久化仓库（防抖写入、原子落盘、损坏自动备份）
-│  ├─ ai.js         模型调用、14 个工具的执行器、多轮 Agent 循环、演示模式降级
-│  └─ sample.js     示例作品《雾隐城》的种子数据（两端共用同一份）
-├─ public/
+├─ server/            零依赖服务端
+│  ├─ index.js        HTTP 服务 + REST 路由 + Markdown 导出 + 多实例启动参数
+│  ├─ store.js        JSON 持久化仓库（防抖写入、原子落盘、损坏自动备份）
+│  ├─ ai.js           模型调用、14 个工具的执行器、多轮 Agent 循环、演示模式降级
+│  ├─ novel-import.js TXT 分章器（中/英/特殊标记，中文数字章号）
+│  └─ sample.js       示例作品《雾隐城》的种子数据（两端共用同一份）
+├─ public/            前端（原生 ES Module，无构建）
 │  ├─ index.html
 │  ├─ css/app.css
 │  └─ js/  app.js（状态与路由）views.js（九个视图）agent.js（助手面板）
 │        ui.js  api.js  importer.js（外部对话解析）
-├─ data-work/store.json    写作端数据 ← 你的真实草稿
-├─ data-demo/store.json    展示端数据 ← 演示内容
+├─ electron/main.js   桌面端主进程（内嵌服务 + 原生窗口）
+├─ build/             构建与测试脚本（图标生成、截图、冒烟测试）
+├─ docs/              功能解析文档 + 界面截图
+├─ data-work/store.json    写作端数据 ← 你的真实草稿（已在 .gitignore 中排除）
+├─ data-demo/store.json    展示端数据 ← 演示内容（已排除）
 └─ 启动-写作.bat / 启动-展示.bat / 启动.sh
 ```
 
 数据只在本机：唯一的外网请求是你自己配置的模型 API。
 
 两个数据目录完全独立，备份时按需拷贝即可——写作端的 `data-work/store.json` 是你唯一不能丢的东西。
+
+## 开源协议
+
+[MIT](LICENSE)
+

@@ -758,11 +758,14 @@ function systemPrompt(projectId, useTools, currentChapterId) {
 const TEXT_PROTOCOL_HINT = [
   '',
   '【重要】当前接口不支持函数调用，你必须用文本协议下达操作：',
-  '每次只能输出一个操作块或最终总结，格式如下：',
+  '每次只输出一个操作块或最终总结，格式如下：',
   '```json',
   '{"tool":"工具名","args":{...}}',
   '```',
-  '可用工具名：create_outline_node / update_outline_node / create_character / update_character / create_relation / create_plot_line / create_beat / create_chapter / add_foreshadow / add_note / add_world_item。',
+  '可用工具名（共 14 个，全部会被系统真正执行并把结果回传给你）：',
+  'create_outline_node / update_outline_node / create_character / update_character / create_relation / create_plot_line / create_beat / create_chapter / add_foreshadow / add_note / add_world_item / read_chapter / read_material / get_project_context',
+  '',
+  '特别说明：read_chapter 是真的能拿到章节正文的——你发出 {"tool":"read_chapter","args":{"title":"某章"}} 后，系统会执行它，并把那一章的全文作为下一条消息回传给你，你就能基于原文继续分析。上下文里只有标题和开头 60 字，所以涉及正文必须先发 read_chapter。',
   '操作全部完毕后，直接输出纯文本总结（不要再出现 json 块）。'
 ].join('\n');
 

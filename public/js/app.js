@@ -218,8 +218,36 @@ async function newProject() {
   });
 }
 
-async function selectProject(id, reloadProjects = false) {
-  state.projectId = id;
+/** 删除当前作品：需要手动输入作品名确认，防止误删 */
+async function deleteCurrentProject() {
+  const p = state.projects.find((x) => x.id === state.projectId);
+  if (!p) return toast('请先选择要删除的作品', 'error');
+  const chapters = (state.data?.chapters || []).length;
+  const outline = (state.data?.outline || []).length;
+  const words = (state.data?.chapters || []).reduce((a, c) => a + (c.content || '').length, 0);
+
+  openForm({
+    title: '删除作品',
+    subtitle: `《${p.title}》`,
+    width: 500, okText: '彻底删除',
+    fields: [{
+      key: 'confirm', label: `这部作品共有 ${chapters} 章（${words.toLocaleString()} 字）、${outline} 个大纲节点。删除后无法恢复。请输入作品名「${p.title}」以确认`,
+      placeholder: p.title
+    }],
+    onSubmit: async (v) => {
+      if (String(v.confirm || '').trim() !== p.title) {
+        toast('作品名不一致，已取消删除', 'error');
+        return false;
+      }
+      await api.deleteProject(p.id);
+      toast(`《${p.title}》已删除`, 'success');
+      const rest = state.projects.filter((x) => x.id !== p.id);
+      await selectProject(rest.length ? rest[0].id : null, true);
+    }
+  });
+}
+
+async function selectProject(id, reloadProjects = false) {  state.projectId = id;
   state.sel = { nodeId: null, chapterId: null, charGraph: false, query: '' };
   state.collapsed = new Set();
   localStorage.setItem(LS_PROJECT, id || '');
@@ -649,6 +677,7 @@ async function boot() {
   const sel = document.getElementById('projectSelect');
   sel.addEventListener('change', () => selectProject(sel.value));
   document.getElementById('btnNewProject').addEventListener('click', () => newProject());
+  document.getElementById('btnDeleteProject').addEventListener('click', deleteCurrentProject);
   document.getElementById('btnExport').addEventListener('click', exportProject);
   document.getElementById('btnImport').addEventListener('click', importProject);
   document.getElementById('btnSettings').addEventListener('click', () => openSettings(ctx));

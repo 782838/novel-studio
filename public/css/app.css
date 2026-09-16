@@ -453,6 +453,8 @@ button { font-family: inherit; cursor: pointer; }
   border-top: 1px dashed var(--border); margin-top: 5px;
 }
 .chapter-group:first-child { border-top: none; margin-top: 0; padding-top: 4px; }
+.btn-danger-ghost { color: #b4443c; }
+.btn-danger-ghost:hover { background: #fdeceb; border-color: #e3a09a; color: #a03a33; }
 .chapter-main { flex: 1; min-width: 0; display: flex; }
 .editor {
   flex: 1; display: flex; flex-direction: column; background: var(--surface);

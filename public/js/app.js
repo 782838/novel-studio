@@ -104,6 +104,12 @@ const ctx = {
   toggleAgent,
   refreshSettings: async () => {
     state.settings = await api.settings();
+    // 顶栏徽章只在启动时设置过一次，中途保存 Key 会一直显示"演示模式"——这里同步刷新
+    const chip = document.getElementById('statusChip');
+    if (chip) {
+      chip.textContent = state.settings.hasKey ? `模型 ${state.settings.model}` : '演示模式';
+      chip.className = `status-chip ${state.settings.hasKey ? 'on' : 'off'}`;
+    }
     agent.paint();
   }
 };

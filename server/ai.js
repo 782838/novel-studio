@@ -170,13 +170,21 @@ function buildLineText(projectId) {
 }
 
 function buildChapterText(projectId) {
-  const chapters = store.byProject('chapters', projectId);
+  const chapters = store.byProject('chapters', projectId)
+    .slice()
+    .sort((a, b) => (a.order || 0) - (b.order || 0));
   if (!chapters.length) return '（暂无章节）';
-  return chapters.map((c) => {
+  const MAX = 150;
+  const list = chapters.slice(0, MAX).map((c) => {
     const wc = (c.content || '').length;
     const head = trunc((c.content || '').replace(/[#>*`]/g, ''), 60);
     return `- [${c.status || 'todo'}] ${c.title}（${wc}字）⟦id:${c.id}⟧${head ? ` 开头：${head}` : ''}`;
-  }).join('\n');
+  });
+  if (chapters.length > MAX) {
+    list.push(`- ……（其余 ${chapters.length - MAX} 章未列出，可用 read_chapter 按 index 读取）`);
+  }
+  list.push('（注意：这里只有标题与开头 60 字，不含正文全文。要分析或续写某一章，先调用 read_chapter 读原文。）');
+  return list.join('\n');
 }
 
 function buildWorldText(projectId) {
@@ -206,41 +214,50 @@ function buildNoteText(projectId) {
   return items.map((n) => `- [${n.category || '备忘'}] ${n.title}：${trunc(n.content, 80)}`).join('\n');
 }
 
-function buildContext(projectId) {
+function buildContext(projectId, currentChapterId) {
   const project = store.getProject(projectId);
   if (!project) throw new Error('项目不存在');
-  return {
-    project,
-    text: [
-      `# 《${project.title}》`,
-      project.genre ? `类型：${project.genre}` : '',
-      project.synopsis ? `一句话简介：${project.synopsis}` : '',
-      '',
-      '## 大纲结构',
-      buildOutlineText(projectId),
-      '',
-      '## 角色档案',
-      buildCharacterText(projectId),
-      '',
-      '## 故事线',
-      buildLineText(projectId),
-      '',
-      '## 章节',
-      buildChapterText(projectId),
-      '',
-      '## 世界设定',
-      buildWorldText(projectId),
-      '',
-      '## 伏笔',
-      buildForeshadowText(projectId),
-      '',
-      '## 创作备忘',
-      buildNoteText(projectId),
-      '',
-      '## 外部素材（从其他平台导入的对话）',
-      buildMaterialText(projectId)
-    ].filter(Boolean).join('\n')
-  };
+  const parts = [
+    `# 《${project.title}》`,
+    project.genre ? `类型：${project.genre}` : '',
+    project.synopsis ? `一句话简介：${project.synopsis}` : '',
+    '',
+    '## 大纲结构',
+    buildOutlineText(projectId),
+    '',
+    '## 角色档案',
+    buildCharacterText(projectId),
+    '',
+    '## 故事线',
+    buildLineText(projectId),
+    '',
+    '## 章节',
+    buildChapterText(projectId),
+    '',
+    '## 世界设定',
+    buildWorldText(projectId),
+    '',
+    '## 伏笔',
+    buildForeshadowText(projectId),
+    '',
+    '## 创作备忘',
+    buildNoteText(projectId),
+    '',
+    '## 外部素材（从其他平台导入的对话）',
+    buildMaterialText(projectId)
+  ].filter(Boolean);
+
+  // 作者正打开的那一章，全文直接进上下文——这是最可能被讨论的内容
+  if (currentChapterId) {
+    const ch = store.find('chapters', currentChapterId);
+    if (ch && ch.projectId === projectId) {
+      const text = ch.content || '';
+      parts.push('', `## 作者当前打开的章节（全文）：${ch.title}`,
+        `（${text.length} 字）`, text || '（本章暂无正文）');
+    }
+  }
+
+  return { project, text: parts.join('\n') };
 }
 
 // ---------------------------------------------------------------- 工具定义
@@ -456,6 +473,22 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'read_chapter',
+      description: '读取某一章的完整正文。上下文里章节只有标题和开头 60 字，分析剧情、续写、改稿前必须先用这个工具读原文，不要凭标题臆测内容。',
+      parameters: {
+        type: 'object',
+        properties: {
+          chapterId: { type: 'string', description: '章节 id（上下文章节列表里的 ⟦id:xxx⟧）' },
+          title: { type: 'string', description: '章节标题（模糊匹配，如「不愧是我的主子」）' },
+          index: { type: 'number', description: '第几章（按顺序，从 1 开始）' },
+          limit: { type: 'number', description: '最多返回多少字符，默认 24000' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_project_context',
       description: '重新拉取当前项目的完整上下文（大纲、角色、线路、设定等），在信息不足时调用。',
       parameters: { type: 'object', properties: {} }
@@ -648,6 +681,33 @@ function makeExecutor(projectId, ops) {
       };
     },
 
+    read_chapter(a = {}) {
+      const chapters = store.byProject('chapters', projectId)
+        .slice()
+        .sort((x, y) => (x.order || 0) - (y.order || 0));
+      let ch = null;
+      if (a.chapterId) ch = chapters.find((c) => c.id === a.chapterId) || null;
+      if (!ch && a.title) {
+        const key = String(a.title).trim();
+        ch = chapters.find((c) => (c.title || '').trim() === key)
+          || chapters.find((c) => (c.title || '').includes(key))
+          || null;
+      }
+      if (!ch && a.index) ch = chapters[Number(a.index) - 1] || null;
+      if (!ch) return { ok: false, message: '找不到章节。可传 chapterId、title（标题模糊匹配）或 index（第几章）' };
+      const limit = a.limit || 24000;
+      const text = ch.content || '';
+      return {
+        ok: true,
+        id: ch.id,
+        title: ch.title,
+        summary: ch.summary || '',
+        words: text.length,
+        truncated: text.length > limit,
+        content: text.slice(0, limit)
+      };
+    },
+
     get_project_context() {
       return { ok: true, context: buildContext(projectId).text };
     },
@@ -672,24 +732,25 @@ function parseArgs(raw) {
 
 // ---------------------------------------------------------------- 系统提示
 
-function systemPrompt(projectId, useTools) {
+function systemPrompt(projectId, useTools, currentChapterId) {
   const extra = settings().agentPersona;
   return [
     '你是一位资深小说策划编辑，协助作者完成长篇小说的构思、架构与落地。',
     '你的工作对象是作者项目里的真实数据——你会通过工具直接读写它，而不是只在嘴巴上建议。',
     '',
     '## 当前项目上下文',
-    buildContext(projectId).text,
+    buildContext(projectId, currentChapterId).text,
     '',
     '## 行为准则',
     '1. 需要了解现状时先调用 get_project_context；上下文里已经带过完整数据，除非创建后需要校验，否则不要重复调用。',
-    '2. 涉及新增或修改（角色、大纲、线路、节拍、伏笔、设定、章节）时，务必调用对应工具真正写入，"只说不做"是不可接受的。',
-    '3. 每创造一条数据前先自查是否与既有设定冲突；发现矛盾要明确指出。',
-    '4. 回答要具体、有判断力，敢于给出取舍建议；不要罗列一堆正确但没用的空话。',
-    '5. 不要一次性塞太多内容——优先给出最有价值的骨架，作者确认后再展开。',
-    '6. 「外部素材」是从其他平台导入的历史对话，可能是未经整理的原始想法。需要引用时先调用 read_material 读取全文，不要凭索引里的预览臆测内容。',
-    '7. 从素材里提炼内容时，要转化为本项目结构化的大纲/角色/线路/设定，而不是照抄原话。',
-    useTools ? '6. 全部操作完成后调用 finish，输出给作者的总结。' : '6. 完成后用 ACTION 之外的方式输出纯文本总结。',
+    '2. 上下文里章节只有标题和开头 60 字。凡是涉及某一章的剧情细节、续写、改稿、找逻辑漏洞，必须先调用 read_chapter 读那章的原文，再开口。作者正打开的那一章全文已经直接给你了。',
+    '3. 涉及新增或修改（角色、大纲、线路、节拍、伏笔、设定、章节）时，务必调用对应工具真正写入，"只说不做"是不可接受的。',
+    '4. 每创造一条数据前先自查是否与既有设定冲突；发现矛盾要明确指出。',
+    '5. 回答要具体、有判断力，敢于给出取舍建议；不要罗列一堆正确但没用的空话。',
+    '6. 不要一次性塞太多内容——优先给出最有价值的骨架，作者确认后再展开。',
+    '7. 「外部素材」是从其他平台导入的历史对话，可能是未经整理的原始想法。需要引用时先调用 read_material 读取全文，不要凭索引里的预览臆测内容。',
+    '8. 从素材里提炼内容时，要转化为本项目结构化的大纲/角色/线路/设定，而不是照抄原话。',
+    useTools ? '9. 全部操作完成后调用 finish，输出给作者的总结。' : '9. 完成后用 ACTION 之外的方式输出纯文本总结。',
     extra ? `\n## 作者额外要求\n${extra}` : ''
   ].filter(Boolean).join('\n');
 }
@@ -720,7 +781,7 @@ function extractActions(text = '') {
   return blocks;
 }
 
-async function runAgent({ projectId, message, history = [] }) {
+async function runAgent({ projectId, message, history = [], chapterId = null }) {
   const ops = [];
   const project = store.getProject(projectId);
   if (!project) throw new Error('项目不存在');
@@ -732,7 +793,7 @@ async function runAgent({ projectId, message, history = [] }) {
   let finishSummary = '';
   let finalText = '';
   const messages = [
-    { role: 'system', content: systemPrompt(projectId, true) + TEXT_PROTOCOL_HINT },
+    { role: 'system', content: systemPrompt(projectId, true, chapterId) + TEXT_PROTOCOL_HINT },
     ...history.slice(-12).map((h) => ({ role: h.role, content: h.content })),
     { role: 'user', content: message }
   ];
@@ -1149,5 +1210,6 @@ function pickName(seed = '') {
 module.exports = {
   settings, llmEnabled, endpointUrl, testConnection, callChat,
   buildContext, buildOutlineText, buildCharacterText, buildLineText,
-  runAgent, generate, continueChapter, analyzeNovel, PALETTE, pickColor
+  runAgent, generate, continueChapter, analyzeNovel, PALETTE, pickColor,
+  makeExecutor
 };

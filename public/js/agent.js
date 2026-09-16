@@ -27,6 +27,9 @@ export function createAgent(ctx) {
   const root = document.getElementById('agentPanel');
   let built = false;
   let busy = false;
+  let pendingText = '';
+  let pendingStart = 0;
+  let pendingTimer = null;
 
   function statusHtml() {
     const configured = ctx.settings.hasKey;
@@ -37,16 +40,20 @@ export function createAgent(ctx) {
 
   function msgsHtml(pending) {
     const msgs = ctx.data.messages || [];
+    // 作者刚发出、服务端还在处理的那条问题——必须立刻显示，否则看起来像"被吞了"
+    const opt = pending && pendingText
+      ? `<div class="bubble user"><div class="bubble-body plain">${esc(pendingText)}</div></div>` : '';
     if (!msgs.length && !pending) {
       return `<div class="agent-welcome">
         <div class="welcome-glyph">✦</div>
         <h4>我能读到你项目里的一切</h4>
-        <p>大纲、角色、线路、章节正文都会进入我的上下文。你既可以让我想，也可以让我直接动手改——新建角色、补大纲、铺节拍都行。</p>
+        <p>大纲、角色、线路、设定都会进入我的上下文；章节会带标题和开头，你正打开的那一章我会直接读到全文，其它章节你说一声我就能去读。你既可以让我想，也可以让我直接动手改——新建角色、补大纲、铺节拍都行。</p>
       </div>`;
     }
-    return msgs.map((m) => bubble(m)).join('') + (pending ? `<div class="bubble assistant pending">
-      <span class="dot-typing"><i></i><i></i><i></i></span><em>助手正在思考并操作数据…</em>
-    </div>` : '');
+    const wait = pending ? `<div class="bubble assistant pending">
+      <span class="dot-typing"><i></i><i></i><i></i></span><em id="pendingWait">助手正在读取项目数据并思考…（0 秒）</em>
+    </div>` : '';
+    return msgs.map((m) => bubble(m)).join('') + opt + wait;
   }
 
   function bubble(m) {
@@ -126,16 +133,25 @@ export function createAgent(ctx) {
     if (!ctx.projectId) return toast('请先选择或新建一部作品', 'error');
 
     busy = true;
+    pendingText = value;
+    pendingStart = Date.now();
     root.querySelector('#agentSend').disabled = true;
     paint(true);
+    pendingTimer = setInterval(() => {
+      const el = root.querySelector('#pendingWait');
+      if (el) el.textContent = `助手正在读取项目数据并思考…（${Math.round((Date.now() - pendingStart) / 1000)} 秒，长问题可能要等一两分钟）`;
+    }, 1000);
     try {
-      const res = await api.aiChat(ctx.projectId, value).catch((e) => {
-        // 网络错误时补一条失败提示，但保留原文以便重发
-        return { reply: `调用失败：${e.message}\n\n请到「设置 → 模型」检查接口地址、Key 与模型名是否正确。`, ops: [] };
+      const res = await api.aiChat(ctx.projectId, value, ctx.sel.chapterId).catch((e) => {
+        // 网络错误时补一条失败提示；问题本身服务端已落盘，不会消失
+        return { reply: `调用失败：${e.message}\n\n你的问题已经保留在上面，可以直接重发，或到「设置 → 模型」检查接口地址、Key 与模型名。`, ops: [], failed: true };
       });
       await ctx.reload();
       if (res.demo) toast('演示模式：尚未配置可用的模型', 'info');
     } finally {
+      clearInterval(pendingTimer);
+      pendingTimer = null;
+      pendingText = '';
       busy = false;
       const btn = root.querySelector('#agentSend');
       if (btn) btn.disabled = false;

@@ -743,18 +743,32 @@ on('POST', '/api/ai/test', async ({ res }) => {
 });
 
 on('POST', '/api/ai/chat', async ({ res, body }) => {
-  const { projectId, message } = body;
+  const { projectId, chapterId } = body;
+  const text = String(body.message || '').trim();
   if (!projectId) return fail(res, '缺少 projectId');
-  if (!message || !String(message).trim()) return fail(res, '内容为空');
+  if (!text) return fail(res, '内容为空');
+
   const history = store.where('messages', (m) => m.projectId === projectId)
     .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
     .slice(-10)
     .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
 
   const t0 = Date.now();
-  const result = await ai.runAgent({ projectId, message: String(message), history });
+  // 先把作者的问题落盘——就算接下来 AI 出错，问题也绝不能"消失"
+  store.insert('messages', { projectId, role: 'user', content: text });
 
-  store.insert('messages', { projectId, role: 'user', content: String(message) });
+  let result;
+  try {
+    result = await ai.runAgent({ projectId, message: text, history, chapterId: chapterId || null });
+  } catch (err) {
+    console.error('[ai/chat]', err.message);
+    const reply = `这次调用出了问题：${err.message}\n\n你的问题已经保留在上面，可以直接重发一次；如果反复失败，请到「设置 → 模型」检查接口地址、Key 与模型名。`;
+    store.insert('messages', { projectId, role: 'assistant', content: reply, ops: [] });
+    store.flush();
+    ok(res, { reply, ops: [], failed: true, latency: Date.now() - t0 });
+    return;
+  }
+
   store.insert('messages', { projectId, role: 'assistant', content: result.reply, ops: result.ops });
   store.flush();
   ok(res, { ...result, latency: Date.now() - t0 });

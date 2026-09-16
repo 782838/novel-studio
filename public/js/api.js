@@ -47,7 +47,7 @@ export default {
   removeItem: (coll, id) => del(`/api/${coll}/${id}`),
 
   aiTest: () => post('/api/ai/test'),
-  aiChat: (projectId, message) => post('/api/ai/chat', { projectId, message }),
+  aiChat: (projectId, message, chapterId) => post('/api/ai/chat', { projectId, message, chapterId }),
   aiGenerate: (projectId, kind, params) => post('/api/ai/generate', { projectId, kind, params }),
   aiContinue: (projectId, chapterId, instruction, words) =>
     post('/api/ai/continue', { projectId, chapterId, instruction, words }),

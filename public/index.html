@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>小说创作工作台</title>
+<link rel="stylesheet" href="./css/app.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">✒</span>
+        <span class="brand-text">
+          <b>小说创作工作台</b>
+          <small>Novel Studio</small>
+        </span>
+      </div>
+
+      <div class="project-picker">
+        <select id="projectSelect" title="切换作品"></select>
+        <button class="btn ghost sm" id="btnNewProject" title="新建作品">＋ 新作品</button>
+      </div>
+
+      <div class="topbar-right">
+        <span id="statusChip" class="status-chip" title="点击放置/收起 AI 助手面板"></span>
+        <button class="btn ghost sm" id="btnExport">导出</button>
+        <button class="btn ghost sm" id="btnImport">导入</button>
+        <button class="btn ghost sm" id="btnSettings">设置</button>
+        <button class="btn primary sm" id="btnToggleAgent">AI 助手</button>
+      </div>
+    </header>
+
+    <div class="shell">
+      <nav class="sidebar" id="sidebar"></nav>
+      <main class="view" id="view"></main>
+      <aside class="agent-panel" id="agentPanel"></aside>
+    </div>
+  </div>
+
+  <div id="modalRoot"></div>
+  <div id="toastRoot"></div>
+  <input type="file" id="importFile" accept="application/json,.json" hidden />
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>

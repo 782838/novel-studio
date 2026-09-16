@@ -1,0 +1,26 @@
+# ---- 依赖：仅打包构建需要，运行时零依赖 ----
+node_modules/
+
+# ---- 打包产物 ----
+dist/
+build/builder-debug.yml
+
+# ---- 本地运行时数据（各实例的私有作品数据，绝不外发）----
+data/
+data-work/
+data-demo/
+
+# ---- 临时文件与日志 ----
+*.log
+.smoke/
+.test*/
+
+# ---- 系统杂项 ----
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- 本地调试残留（含本机路径信息，不对外发布）----
+_bg.txt
+_diag.txt
+_*.txt

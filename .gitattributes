@@ -1,0 +1,16 @@
+# 统一换行符，避免跨机器检出后出问题
+* text=auto eol=lf
+
+# Windows 启动脚本必须是 CRLF：cmd.exe 解析 .bat 时，LF 换行 + 中文会导致整行错位
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Shell 脚本必须是 LF
+*.sh text eol=lf
+
+# 二进制资源不做换行转换
+*.png binary
+*.ico binary
+*.jpg binary
+*.woff2 binary

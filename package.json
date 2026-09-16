@@ -1,0 +1,68 @@
+{
+  "name": "novel-studio",
+  "productName": "小说创作工作台",
+  "version": "1.0.0",
+  "private": true,
+  "description": "小说辅助创作工作台：大纲记忆与补全、角色集、主次线路梳理、可操作的 AI 智能体",
+  "author": "Novel Studio",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "electron": "electron .",
+    "dist": "electron-builder --win nsis",
+    "icon": "node build/make-icon.js",
+    "smoke": "node build/smoke_embedded.js",
+    "smoke:packaged": "node build/smoke_packaged.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "build": {
+    "appId": "com.novelstudio.desktop",
+    "productName": "小说创作工作台",
+    "asar": true,
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "server/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "public",
+        "to": "public"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "小说创作工作台",
+      "artifactName": "小说创作工作台-安装包-${version}-setup.${ext}",
+      "deleteAppDataOnUninstall": false
+    },
+    "publish": null
+  },
+  "devDependencies": {
+    "electron": "^44.4.1",
+    "electron-builder": "^26.15.3"
+  }
+}

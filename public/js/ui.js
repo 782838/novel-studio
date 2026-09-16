@@ -1,0 +1,212 @@
+'use strict';
+
+/* ---------------- 转义 ---------------- */
+export function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+export function uid(p = 'id') {
+  return `${p}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+export function debounce(fn, ms = 500) {
+  let t;
+  let last = [];
+  const wrapped = (...a) => { last = a; clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  wrapped.cancel = () => clearTimeout(t);
+  /** 立即执行挂起的调用（用于刷新前保存草稿） */
+  wrapped.flush = () => { clearTimeout(t); if (last.length) fn(...last); last = []; };
+  return wrapped;
+}
+
+/* ---------------- Toast ---------------- */
+let toastRoot = null;
+export function toast(message, kind = 'info', ms = 2600) {
+  if (!toastRoot) toastRoot = document.getElementById('toastRoot');
+  const el = document.createElement('div');
+  el.className = `toast toast-${kind}`;
+  el.innerHTML = `<span class="toast-icon">${kind === 'error' ? '!' : kind === 'success' ? '✓' : '·'}</span><span>${esc(message)}</span>`;
+  toastRoot.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('in'));
+  setTimeout(() => { el.classList.remove('in'); setTimeout(() => el.remove(), 300); }, ms);
+}
+
+/* ---------------- 极简 Markdown ---------------- */
+export function md(src) {
+  if (!src) return '';
+  const lines = String(src).replace(/\r\n/g, '\n').split('\n');
+  const out = [];
+  let list = null;
+  let para = [];
+
+  const flushPara = () => {
+    if (!para.length) return;
+    out.push(`<p>${inline(para.join('<br>'))}</p>`);
+    para = [];
+  };
+  const flushList = () => {
+    if (!list) return;
+    out.push(`<${list.tag}>${list.items.map((i) => `<li>${inline(i)}</li>`).join('')}</${list.tag}>`);
+    list = null;
+  };
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) { flushPara(); flushList(); continue; }
+
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { flushPara(); flushList(); const lv = Math.min(6, h[1].length); out.push(`<h${lv}>${inline(h[2])}</h${lv}>`); continue; }
+
+    if (/^(-{3,}|\*{3,})$/.test(line.trim())) { flushPara(); flushList(); out.push('<hr>'); continue; }
+
+    const quote = line.match(/^>\s?(.*)$/);
+    if (quote) { flushPara(); flushList(); out.push(`<blockquote>${inline(quote[1])}</blockquote>`); continue; }
+
+    const ul = line.match(/^\s*[-*]\s+(.*)$/);
+    if (ul) {
+      flushPara();
+      if (!list || list.tag !== 'ul') { flushList(); list = { tag: 'ul', items: [] }; }
+      list.items.push(ul[1]);
+      continue;
+    }
+    const ol = line.match(/^\s*\d+[.、]\s+(.*)$/);
+    if (ol) {
+      flushPara();
+      if (!list || list.tag !== 'ol') { flushList(); list = { tag: 'ol', items: [] }; }
+      list.items.push(ol[1]);
+      continue;
+    }
+
+    flushList();
+    para.push(line);
+  }
+  flushPara(); flushList();
+  return out.join('');
+
+  function inline(text) {
+    return esc(text)
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>')
+      .replace(/~~([^~]+)~~/g, '<del>$1</del>');
+  }
+}
+
+/* ---------------- Modal ---------------- */
+let modalRoot = null;
+
+export function closeModal(el) {
+  if (el && el.classList) el.classList.remove('in');
+  const node = el || (modalRoot && modalRoot.lastElementChild);
+  if (!node) return;
+  setTimeout(() => node.remove(), 200);
+}
+
+/**
+ * 打开弹窗。
+ * @param {object} opt {title, subtitle, html, width, footer, buttons:[{label,kind,onClick,keepOpen}], onMount}
+ */
+export function openModal(opt = {}) {
+  if (!modalRoot) modalRoot = document.getElementById('modalRoot');
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-mask';
+  wrap.innerHTML = `
+    <div class="modal" style="width:${opt.width || 560}px">
+      <div class="modal-head">
+        <div>
+          <h3>${esc(opt.title || '')}</h3>
+          ${opt.subtitle ? `<p class="modal-sub">${esc(opt.subtitle)}</p>` : ''}
+        </div>
+        <button class="icon-btn" data-close aria-label="关闭">✕</button>
+      </div>
+      <div class="modal-body">${opt.html || ''}</div>
+      ${(opt.buttons && opt.buttons.length) || opt.footer !== false ? `
+      <div class="modal-foot">
+        <div class="foot-left">${opt.footerLeft || ''}</div>
+        <div class="foot-right">
+          ${(opt.buttons || [{ label: '关闭', kind: 'ghost', onClick: () => {} }]).map((b, i) =>
+            `<button class="btn ${b.kind || 'ghost'}" data-btn="${i}">${esc(b.label)}</button>`).join('')}
+        </div>
+      </div>` : ''}
+    </div>`;
+
+  modalRoot.appendChild(wrap);
+  requestAnimationFrame(() => wrap.classList.add('in'));
+
+  const bodyEl = wrap.querySelector('.modal-body');
+  wrap.addEventListener('click', (e) => {
+    if (e.target === wrap || e.target.closest('[data-close]')) { closeModal(wrap); return; }
+    const b = e.target.closest('[data-btn]');
+    if (b) {
+      const def = (opt.buttons || [{}])[Number(b.dataset.btn)];
+      const proceed = def.onClick ? def.onClick(bodyEl, wrap) : undefined;
+      if (proceed !== false && !def.keepOpen) closeModal(wrap);
+    }
+  });
+  if (opt.onMount) opt.onMount(bodyEl, wrap);
+  return { wrap, body: bodyEl, close: () => closeModal(wrap) };
+}
+
+/** 表单弹窗：fields 为 [{key,label,type,options,placeholder,rows,hint}] */
+export function openForm({ title, subtitle, fields = [], values = {}, okText = '保存', width = 560, onSubmit }) {
+  return openModal({
+    title, subtitle, width,
+    html: `<form class="form" autocomplete="off">${fields.map(f => {
+      const v = values[f.key] != null ? values[f.key] : (f.default != null ? f.default : '');
+      const common = `name="${f.key}" ${f.placeholder ? `placeholder="${esc(f.placeholder)}"` : ''}`;
+      let ctrl;
+      if (f.type === 'textarea') ctrl = `<textarea ${common} rows="${f.rows || 4}">${esc(v)}</textarea>`;
+      else if (f.type === 'select') ctrl = `<select ${common}>${(f.options || []).map(o => {
+        const [val, lab] = Array.isArray(o) ? o : [o, o];
+        return `<option value="${esc(val)}" ${String(v) === String(val) ? 'selected' : ''}>${esc(lab)}</option>`;
+      }).join('')}</select>`;
+      else ctrl = `<input type="${f.type || 'text'}" ${common} value="${esc(v)}">`;
+      return `<label class="field ${f.type === 'textarea' ? 'field-area' : ''}">
+        <span>${esc(f.label)}${f.hint ? `<em>${esc(f.hint)}</em>` : ''}</span>
+        ${ctrl}
+      </label>`;
+    }).join('')}</form>`,
+    buttons: [
+      { label: '取消', kind: 'ghost', onClick: () => {} },
+      {
+        label: okText, kind: 'primary', keepOpen: true,
+        onClick: (body, wrap) => {
+          const form = body.querySelector('form');
+          const data = {};
+          fields.forEach((f) => {
+            const el = form.elements[f.key];
+            if (!el) return;
+            data[f.key] = f.type === 'number' ? Number(el.value) : el.value.trim();
+          });
+          if (onSubmit(data, wrap) !== false) closeModal(wrap);
+        }
+      }
+    ],
+    onMount: (body) => {
+      const first = body.querySelector('input,textarea,select');
+      if (first) first.focus();
+      body.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+          const btn = body.closest('.modal').querySelector('[data-btn="1"]');
+          if (btn) btn.click();
+        }
+      });
+    }
+  });
+}
+
+export function openConfirm({ title = '确认操作', message, danger = false, okText = '确定' }) {
+  return new Promise((resolve) => {
+    openModal({
+      title, width: 420,
+      html: `<p class="confirm-text">${esc(message || '')}</p>`,
+      buttons: [
+        { label: '取消', kind: 'ghost', onClick: () => resolve(false) },
+        { label: okText, kind: danger ? 'danger' : 'primary', onClick: () => resolve(true) }
+      ],
+      onMount: () => {}
+    });
+  });
+}

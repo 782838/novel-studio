@@ -147,7 +147,7 @@ async function api(method, url, body) {
   console.log('\n== 5. 创建 Release ==');
   const changelogPath = path.join(ROOT, 'CHANGELOG.md');
   const changelog = fs.existsSync(changelogPath)
-    ? fs.readFileSync(changelogPath, 'utf8').trim()
+    ? fs.readFileSync(changelogPath, 'utf8').trim().replace(/^#\s+[^\n]*\n+/, '')  // 去掉自带的大标题，避免与「### 更新日志」重复
     : `## v${version}\n\n- 详见仓库 CHANGELOG.md`;
   const releaseBody = [
     `## 小说创作工作台 v${version}`,

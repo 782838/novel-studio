@@ -184,6 +184,13 @@ async function api(method, url, body) {
     console.log('  · Release 已存在，改为查找并复用');
     const found = await api('GET', `/repos/${owner}/${REPO}/releases/tags/${tag}`);
     rel = found;
+    // 复用时把标题/说明刷新为最新模板（含最新 CHANGELOG 与正确的附件名）
+    const upd = await api('PATCH', `/repos/${owner}/${REPO}/releases/${found.json.id}`, {
+      name: `${tag} · 小说创作工作台`,
+      body: releaseBody
+    });
+    if (upd.status === 200) console.log('  · 已刷新 Release 说明为最新内容');
+    else console.log(`  ! 刷新 Release 说明失败（HTTP ${upd.status}），保留旧说明`);
   } else {
     console.error(`  ✗ 创建 Release 失败（HTTP ${rel.status}）：${rel.json && rel.json.message}`);
     process.exit(1);

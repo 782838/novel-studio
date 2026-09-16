@@ -29,8 +29,10 @@ try {
 } catch (e) { console.log('(asar 列表跳过:', e.message, ')'); }
 
 /* --- 2) 启动应用 --- */
-fs.rmSync(userData, { recursive: true, force: true });
+// 注意：绝不删除 userData —— 里面是用户在安装版里写的真实作品数据。
+// 只清掉上次冒烟留下的 startup.log，保证端口是本次新写的。
 console.log('\n[启动] ' + EXE);
+if (fs.existsSync(logFile)) fs.rmSync(logFile, { force: true });
 // 宿主环境带了 ELECTRON_RUN_AS_NODE=1，会让 Electron 退化成纯 Node，必须剔除
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;

@@ -195,14 +195,26 @@ async function api(method, url, body) {
     console.log('  · dist 下没有 .exe，跳过（可先运行 npm run dist）');
   } else {
     console.log('\n== 6. 上传安装包 ==');
-    const existing = (release.assets || []).map((a) => a.name);
     for (const name of assets) {
       const full = path.join(distDir, name);
       const size = fs.statSync(full).size;
-      if (existing.includes(name)) { console.log(`  · ${name} 已存在，跳过`); continue; }
+      const live = release.assets || [];
+      if (live.some((a) => a.name === name)) { console.log(`  · ${name} 已存在，跳过`); continue; }
+      // 之前上传过但名字被损坏的（大小一致）→ 只改名，不重复上传
+      const mangled = live.find((a) => a.size === size && a.name !== name);
+      if (mangled) {
+        const fixed = await api('PATCH', `/repos/${owner}/${REPO}/releases/assets/${mangled.id}`, { name });
+        if (fixed.status === 200 && fixed.json && fixed.json.name === name) console.log(`  · 已修正附件名：${mangled.name} → ${name}`);
+        else console.log(`  ! 修正附件名失败，仍是 ${mangled.name}`);
+        continue;
+      }
+      // 坑：附件名要走 URL query，中文在这条链路上会被损坏
+      // （实测「小说创作工作台-安装包-1.0.0-setup.exe」被存成了「-.-1.0.0-setup.exe」）。
+      // 所以先用纯 ASCII 名上传，拿到 asset id 后再用 JSON body PATCH 回真正的中文名。
+      const ascii = name.replace(/[^\x20-\x7E]/g, '_');
       process.stdout.write(`  上传 ${name}（${(size / 1048576).toFixed(1)} MB）…`);
       const up = await fetch(
-        `https://uploads.github.com/repos/${owner}/${REPO}/releases/${release.id}/assets?name=${encodeURIComponent(name)}`,
+        `https://uploads.github.com/repos/${owner}/${REPO}/releases/${release.id}/assets?name=${encodeURIComponent(ascii)}`,
         {
           method: 'POST',
           headers: { ...H, 'Content-Type': 'application/octet-stream', 'Content-Length': String(size) },
@@ -210,8 +222,18 @@ async function api(method, url, body) {
           duplex: 'half'
         }
       );
-      if (up.status === 201) console.log(' 完成');
-      else console.log(` 失败（HTTP ${up.status}）：${(await up.text()).slice(0, 200)}`);
+      if (up.status !== 201) {
+        console.log(` 失败（HTTP ${up.status}）：${(await up.text()).slice(0, 200)}`);
+        continue;
+      }
+      const asset = await up.json();
+      if (asset.name !== name) {
+        const fixed = await api('PATCH', `/repos/${owner}/${REPO}/releases/assets/${asset.id}`, { name });
+        if (fixed.status === 200 && fixed.json && fixed.json.name === name) console.log(' 完成（已改回原名）');
+        else console.log(` 完成，但附件名仍是 ${asset.name}`);
+      } else {
+        console.log(' 完成');
+      }
     }
   }
 

@@ -9,8 +9,11 @@
  *
  * 用法（需要先起一个测试实例，例如 5399 端口）：
  *   electron build/e2e-ui.js [端口]
+ *
+ * 建议每次运行前清空测试实例的数据目录（例如 rm -rf .e2e 后重启 --seed），
+ * 部分用例（置顶、改名）依赖示例数据的初始状态。
  */
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, clipboard } = require('electron');
 const http = require('http');
 const path = require('path');
 
@@ -25,6 +28,8 @@ app.disableHardwareAcceleration();
 const PORT = Number(process.argv[2]) || 5399;
 const BASE = `http://127.0.0.1:${PORT}`;
 const FAKE_PORT = PORT + 1;
+const SLOW_MARK = '慢慢说';
+const PROTO_MARK = '协议测试';
 
 let pass = 0, fail = 0;
 const check = (n, ok, info = '') => {
@@ -39,9 +44,15 @@ const fake = http.createServer((req, res) => {
   req.on('end', () => {
     const payload = JSON.parse(raw || '{}');
     const msgs = payload.messages || [];
-    // 模拟「模型不支持函数调用、只在正文里写 ```json 操作块」的模型（实测 deepseek 系如此）
-    const protocol = msgs.some((m) => m.role === 'user' && String(m.content).includes('协议测试'));
-    const gotResults = msgs.some((m) => m.role === 'user' && String(m.content).startsWith('执行结果：'));
+    // 只按「当前这一问」决定走哪条分支：历史消息里可能残留上一轮的标记，按全局匹配会串味
+    const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
+    const lastText = String((lastUser && lastUser.content) || '');
+    const resultsTurn = lastText.startsWith('执行结果：');
+    const protocol = /协议测试/.test(lastText)
+      || (resultsTurn && msgs.some((m) => String(m.content).includes(PROTO_MARK)));
+    const slow = /慢慢说/.test(lastText)
+      || (resultsTurn && msgs.some((m) => String(m.content).includes(SLOW_MARK)));
+    const gotResults = resultsTurn;
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     const put = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
     if (protocol) {
@@ -230,6 +241,57 @@ const putJSON = (url, body) => fetch(BASE + url, {
     };
   });
   check('操作被真正执行、给出总结、界面无乱码', r.ok, r.info);
+
+  /* ---------------------------------------- 7. 消息复制（用真剪贴板核对） */
+  console.log('\n== 7. 复制消息 ==');
+  // Chromium 要求文档处于聚焦状态才允许写剪贴板，隐藏窗口会被拒绝（真实使用不受影响）。
+  // 这一节需要把窗口真正显示出来并聚焦，测完再隐藏。
+  win.show();
+  win.focus();
+  await sleep(600);
+  clipboard.clear();
+  r = await run(async () => {
+    const sleep = (ms) => new Promise((x) => setTimeout(x, ms));
+    const users = [...document.querySelectorAll('#agentMsgs .bubble.user')];
+    const last = users[users.length - 1];
+    const text = last.querySelector('.bubble-body').textContent;
+    last.querySelector('.bubble-copy').click();
+    await sleep(500);
+    return { text, btn: last.querySelector('.bubble-copy').textContent.trim(), count: users.length };
+  });
+  // 这个 Electron 版本的 clipboard.readText() 返回 Promise，两种都兼容
+  const readClip = async () => {
+    let v = clipboard.readText();
+    if (v && typeof v.then === 'function') v = await v;
+    return String(v == null ? '' : v);
+  };
+  const clipUser = await readClip();
+  check('复制「我的消息」到剪贴板', !!r.text && clipUser.trim() === r.text.trim(),
+    `[${typeof clipboard.readText()}] 剪贴板=${JSON.stringify(clipUser.slice(0, 30))} 期望=${JSON.stringify(String(r.text).slice(0, 30))} 按钮=${r.btn}`);
+
+  clipboard.clear();
+  r = await run(async () => {
+    const sleep = (ms) => new Promise((x) => setTimeout(x, ms));
+    const all = [...document.querySelectorAll('#agentMsgs .bubble.assistant')];
+    const last = all[all.length - 1];
+    const btn = last.querySelector('.bubble-copy');
+    btn.click();
+    await sleep(500);
+    return { btn: btn.textContent.trim(), hasBtn: !!btn, total: all.length };
+  });
+  const clipAi = await readClip();
+  check('复制「助手回答」到剪贴板（拿到的是原文，不是渲染后的 HTML）',
+    /两条备忘都记好了/.test(clipAi) && !/```/.test(clipAi),
+    `按钮=${r.btn} 剪贴板=${JSON.stringify(clipAi.slice(0, 50))}`);
+
+  clipboard.clear();
+  await run(async () => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, shiftKey: true, bubbles: true }));
+  });
+  await sleep(400);
+  const clipKey = await readClip();
+  check('Ctrl+Shift+C 复制最后一条回答', /两条备忘都记好了/.test(clipKey), JSON.stringify(clipKey.slice(0, 50)));
+  win.hide();
 
   try { win.destroy(); } catch (_) { /* ignore */ }
   fake.close();

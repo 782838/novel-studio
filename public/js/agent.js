@@ -56,7 +56,8 @@ export function createAgent(ctx) {
     const msgs = ctx.data.messages || [];
     // 作者刚发出、服务端还在处理的那条问题——必须立刻显示，否则看起来像"被吞了"
     const mine = pendingText
-      ? `<div class="bubble user"><div class="bubble-body plain">${esc(pendingText)}</div></div>` : '';
+      ? `<div class="bubble user"><div class="bubble-body plain">${esc(pendingText)}</div>
+          <button class="bubble-copy" data-copy-mode="pending" title="复制这条消息">复制</button></div>` : '';
     if (!msgs.length && !pendingText && !live) {
       return `<div class="agent-welcome">
         <div class="welcome-glyph">✦</div>
@@ -64,7 +65,7 @@ export function createAgent(ctx) {
         <p>大纲、角色、线路、设定都会进入我的上下文；章节会带标题和开头，你正打开的那一章我会直接读到全文，其它章节你说一声我就能去读。你既可以让我想，也可以让我直接动手改——新建角色、补大纲、铺节拍都行。</p>
       </div>`;
     }
-    return msgs.map((m) => bubble(m)).join('') + mine + liveHtml();
+    return msgs.map((m, i) => bubble(m, i)).join('') + mine + liveHtml();
   }
 
   function liveHtml() {
@@ -78,6 +79,8 @@ export function createAgent(ctx) {
       : '';
     const answer = live.answer ? `<div class="live-answer" id="liveAnswer">${esc(live.answer)}</div>` : '';
     const idle = !live.thinking && !live.answer && !live.notes.length;
+    const copy = live.answer
+      ? `<button class="bubble-copy" data-copy-mode="live" title="复制正在生成的回答">复制</button>` : '';
     return `<div class="bubble assistant">
       <div class="bubble-avatar">✦</div>
       <div class="bubble-body">
@@ -89,12 +92,14 @@ export function createAgent(ctx) {
         <div class="live-foot"><span class="dot-typing sm"><i></i><i></i><i></i></span>已等待 <b id="liveWaited">${waited}</b> 秒 · 可随时点「停止」
         </div>
       </div>
+      ${copy}
     </div>`;
   }
 
-  function bubble(m) {
+  function bubble(m, idx) {
     const mine = m.role === 'user';
-    if (mine) return `<div class="bubble user"><div class="bubble-body plain">${esc(m.content)}</div></div>`;
+    const copy = `<button class="bubble-copy" data-copy-mode="msg" data-idx="${idx}" title="复制这条消息${mine ? '' : '（Ctrl+Shift+C 复制最后一条回答）'}">复制</button>`;
+    if (mine) return `<div class="bubble user"><div class="bubble-body plain">${esc(m.content)}</div>${copy}</div>`;
     const meta = [];
     if (m.thinkMs) meta.push(`思考 ${secs(m.thinkMs)} 秒`);
     if (m.latency) meta.push(`用时 ${secs(m.latency)} 秒`);
@@ -105,6 +110,7 @@ export function createAgent(ctx) {
         ${md(m.content)}${opsHtml(m.ops)}
         ${meta.length ? `<div class="bubble-meta">${meta.join(' · ')}</div>` : ''}
       </div>
+      ${copy}
     </div>`;
   }
 
@@ -113,6 +119,74 @@ export function createAgent(ctx) {
     return `<details class="ops"><summary>已执行 ${ops.length} 项操作</summary>
       <ul>${ops.map((o) => `<li><span class="op-dot"></span>${esc(o.label || o.action)}</li>`).join('')}</ul>
     </details>`;
+  }
+
+  /** 复制文本：优先 Clipboard API，失败退回临时 textarea（局域网 http 打开时也可用） */
+  async function copyText(text) {
+    const val = String(text || '');
+    if (!val.trim()) return false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(val);
+        return true;
+      }
+    } catch (_) { /* 落到下面的兜底 */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = val;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-2000px';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, val.length);
+      const done = document.execCommand('copy');
+      ta.remove();
+      return done;
+    } catch (_) { return false; }
+  }
+
+  /** 复制并给出反馈：按钮闪一下 ✓，同时 toast 说明复制了什么 */
+  async function doCopy(text, btn, label) {
+    const ok = await copyText(text);
+    if (ok && btn) {
+      btn.classList.add('done');
+      btn.textContent = '已复制';
+      setTimeout(() => { btn.classList.remove('done'); btn.textContent = '复制'; }, 1400);
+    }
+    toast(ok ? `${label}已复制` : '复制失败，请手动选中后按 Ctrl+C', ok ? 'success' : 'error', 1600);
+    return ok;
+  }
+
+  /** 取消息原文（复制的是 Markdown 原文，不是渲染后的 HTML） */
+  function textOf(btn) {
+    const mode = btn.dataset.copyMode;
+    if (mode === 'live') return live ? live.answer : '';
+    if (mode === 'pending') return pendingText;
+    const m = (ctx.data.messages || [])[Number(btn.dataset.idx)];
+    return m ? m.content : '';
+  }
+
+  /** Ctrl / Cmd + Shift + C：复制最后一条回答 */
+  function copyLastReply() {
+    if (live && live.answer) {
+      const btn = root.querySelector('[data-copy-mode="live"]');
+      return doCopy(live.answer, btn, '正在生成的回答');
+    }
+    const list = (ctx.data.messages || []).filter((m) => m.role === 'assistant');
+    if (!list.length) return toast('还没有助手的回答可以复制', 'info');
+    const last = list[list.length - 1];
+    const bubbles = root.querySelectorAll('#agentMsgs .bubble.assistant .bubble-copy');
+    return doCopy(last.content, bubbles[bubbles.length - 1], '助手回答');
+  }
+
+  function onShortcut(e) {
+    if (!(e.ctrlKey || e.metaKey) || !e.shiftKey) return;
+    if (String(e.key || '').toLowerCase() !== 'c') return;
+    const panel = document.getElementById('agentPanel');
+    if (!panel || !panel.classList.contains('open')) return;
+    e.preventDefault();
+    copyLastReply();
   }
 
   function build() {
@@ -163,6 +237,7 @@ export function createAgent(ctx) {
       await ctx.reload();
       toast('已清空', 'success');
     });
+    document.addEventListener('keydown', onShortcut);
   }
 
   /** 按钮在「发送 / 停止」之间切换 */
@@ -183,7 +258,26 @@ export function createAgent(ctx) {
     const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 140;
     box.innerHTML = msgsHtml();
     if (nearBottom) box.scrollTop = box.scrollHeight;
+    bindCopy(box);
     syncSend();
+  }
+
+  /** 每条消息（我的 / 助手的 / 正在生成的）都挂一个复制按钮 */
+  function bindCopy(box) {
+    box.querySelectorAll('.bubble-copy').forEach((b) => {
+      const mode = b.dataset.copyMode;
+      let label = '内容';
+      if (mode === 'pending') label = '我的问题';
+      else if (mode === 'live') label = '正在生成的回答';
+      else {
+        const m = (ctx.data.messages || [])[Number(b.dataset.idx)];
+        label = m && m.role === 'user' ? '我的消息' : '助手回答';
+      }
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        doCopy(textOf(b), b, label);
+      });
+    });
   }
 
   /** 流式期间约 10fps 重绘，既不卡又能实时看到思考与正文 */

@@ -33,6 +33,10 @@ try {
 // 只清掉上次冒烟留下的 startup.log，保证端口是本次新写的。
 console.log('\n[启动] ' + EXE);
 if (fs.existsSync(logFile)) fs.rmSync(logFile, { force: true });
+// 先清掉可能残留的实例：应用是单实例锁，残留进程会让新实例直接退出，
+// 表现为「日志有端口但连不上」，很容易误判成打包坏了。
+try { execSync('taskkill /IM 小说创作工作台.exe /T /F', { stdio: 'ignore' }); } catch (_) { /* 没有残留 */ }
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 900);   // 同步等待（这里是 CJS，不能用 top-level await）
 // 宿主环境带了 ELECTRON_RUN_AS_NODE=1，会让 Electron 退化成纯 Node，必须剔除
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;

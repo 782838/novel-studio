@@ -747,12 +747,23 @@ body.agent-open .agent-panel { width: 396px; flex-basis: 396px; border-left-colo
   font-size: 11.5px; line-height: 1.7; color: var(--muted); white-space: pre-wrap;
 }
 .live-status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-style: italic; }
+.live-notes { margin: 4px 0; }
+.live-note { display: block; font-size: 11.5px; color: var(--muted); }
 .live-ops { display: flex; flex-direction: column; gap: 3px; margin: 6px 0 4px; }
 .live-op {
   font-size: 11.5px; color: #2f6b4f; background: #eaf6ef; border: 1px solid #cfe8db;
   border-radius: 6px; padding: 2px 7px; align-self: flex-start;
 }
 .live-answer { white-space: pre-wrap; }
+/* markdown 代码块（AI 下达的操作块、贴进来的代码） */
+.md-pre {
+  margin: 7px 0; padding: 8px 10px; background: #f7f6f2; border: 1px solid var(--border);
+  border-radius: 7px; overflow-x: auto;
+}
+.md-pre code {
+  background: none; padding: 0; font-size: 11.5px; line-height: 1.65;
+  color: var(--text-2); white-space: pre; font-family: ui-monospace, Consolas, monospace;
+}
 .live-foot {
   display: flex; align-items: center; gap: 7px; margin-top: 8px; padding-top: 6px;
   border-top: 1px dashed var(--border); font-size: 11px; color: var(--muted);

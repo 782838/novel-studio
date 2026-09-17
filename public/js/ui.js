@@ -40,10 +40,11 @@ export function md(src) {
   const out = [];
   let list = null;
   let para = [];
+  let code = null;   // ``` 代码块缓冲
 
   const flushPara = () => {
     if (!para.length) return;
-    out.push(`<p>${inline(para.join('<br>'))}</p>`);
+    out.push(`<p>${inline(para.join('\n'))}</p>`);
     para = [];
   };
   const flushList = () => {
@@ -51,9 +52,23 @@ export function md(src) {
     out.push(`<${list.tag}>${list.items.map((i) => `<li>${inline(i)}</li>`).join('')}</${list.tag}>`);
     list = null;
   };
+  const flushCode = () => {
+    if (code === null) return;
+    // AI 下达的 json 操作块走这里，显示成代码块，不会裸露成一堆乱码段落
+    out.push(`<pre class="md-pre"><code>${esc(code.join('\n'))}</code></pre>`);
+    code = null;
+  };
 
   for (const raw of lines) {
     const line = raw.trimEnd();
+
+    if (/^\s*```/.test(line)) {
+      if (code === null) { flushPara(); flushList(); code = []; }
+      else flushCode();
+      continue;
+    }
+    if (code !== null) { code.push(raw); continue; }
+
     if (!line.trim()) { flushPara(); flushList(); continue; }
 
     const h = line.match(/^(#{1,6})\s+(.*)$/);
@@ -82,11 +97,14 @@ export function md(src) {
     flushList();
     para.push(line);
   }
-  flushPara(); flushList();
+  flushPara(); flushList(); flushCode();
   return out.join('');
 
   function inline(text) {
+    // 顺序很重要：先转义、再把换行换成 <br>。反过来会把 <br> 本身也转义成文本，
+    // 界面上就会冒出一堆字面量 <br>（之前就是这个 bug）。
     return esc(text)
+      .replace(/\n/g, '<br>')
       .replace(/`([^`]+)`/g, '<code>$1</code>')
       .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
       .replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>')

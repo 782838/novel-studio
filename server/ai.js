@@ -8,6 +8,9 @@
 const store = require('./store');
 
 const MAX_ROUNDS = 8;
+/** 文本协议模型是一批一批来的（写块 → 等结果 → 再写），轮次上限放宽一些，
+ *  否则"把某条副线的所有章节读出来整合"这类长任务会在中途被截断。 */
+const MAX_ROUNDS_TEXT = 16;
 const REQUEST_TIMEOUT = 180000;
 
 // ---------------------------------------------------------------- 基础调用
@@ -849,19 +852,26 @@ function systemPrompt(projectId, useTools, currentChapterId) {
 
 const TEXT_PROTOCOL_HINT = [
   '',
-  '【重要】当前接口不支持函数调用，你必须用文本协议下达操作：',
-  '每次只输出一个操作块或最终总结，格式如下：',
+  '【重要】当前接口无法使用函数调用，你必须改用文本协议下达操作：',
+  '要执行操作时，输出这样的代码块（一次可以写多个）：',
   '```json',
   '{"tool":"工具名","args":{...}}',
   '```',
-  '可用工具名（共 14 个，全部会被系统真正执行并把结果回传给你）：',
+  '这些块会被系统**真正执行**，并把执行结果作为下一条消息回传给你。绝不要只是"说明你打算调用什么"而不写块——那等于什么都没做。',
+  '',
+  '可用工具名：',
   'create_outline_node / update_outline_node / create_character / update_character / create_relation / create_plot_line / create_beat / create_chapter / add_foreshadow / add_note / add_world_item / read_chapter / read_material / get_project_context',
   '',
-  '特别说明：read_chapter 是真的能拿到章节正文的——你发出 {"tool":"read_chapter","args":{"title":"某章"}} 后，系统会执行它，并把那一章的全文作为下一条消息回传给你，你就能基于原文继续分析。上下文里只有标题和开头 60 字，所以涉及正文必须先发 read_chapter。',
-  '操作全部完毕后，直接输出纯文本总结（不要再出现 json 块）。'
+  '特别说明：read_chapter 是真的能拿到章节正文的——你发出 {"tool":"read_chapter","args":{"title":"某章"}} 后，系统会执行它，并把那一章的全文回传给你。上下文里只有标题和开头 60 字，所以涉及正文必须先发 read_chapter。',
+  '需要多次操作时：写一批块 → 等系统回传结果 → 再写下一批。',
+  '全部操作完成后，输出纯文本总结（这条消息里不要再出现 json 块）。',
+  '（本节与上文若有不一致之处，以本节为准。）'
 ].join('\n');
 
 // ---------------------------------------------------------------- 主循环
+
+/** 工具名白名单：文本协议里只认真正存在的工具，避免把模型随口写的 json 当成操作 */
+const TOOL_NAMES = new Set(TOOLS.map((t) => t.function && t.function.name).filter(Boolean));
 
 function extractActions(text = '') {
   const blocks = [];
@@ -870,7 +880,10 @@ function extractActions(text = '') {
   while ((m = re.exec(text))) {
     try {
       const obj = JSON.parse(m[1].trim());
-      if (obj && obj.tool) blocks.push(obj);
+      const list = Array.isArray(obj) ? obj : [obj];
+      for (const it of list) {
+        if (it && it.tool && TOOL_NAMES.has(it.tool)) blocks.push(it);
+      }
     } catch (_) { /* 不是合法 JSON，忽略 */ }
   }
   return blocks;
@@ -908,6 +921,13 @@ async function runAgent({ projectId, message, history = [], chapterId = null, on
     { role: 'user', content: message }
   ];
 
+  /** 只读工具不产生数据变更，但作者也该看见助手到底读了什么 */
+  const READ_LABEL = {
+    read_chapter: (r) => `读了章节「${r.title}」（${r.words} 字${r.truncated ? '，已截断' : ''}）`,
+    read_material: (r) => `读了素材「${r.title || '外部素材'}」`,
+    get_project_context: () => '重新拉取了项目上下文'
+  };
+
   /** 执行一个工具，并把「已执行」这类操作实时推给前端 */
   const runTool = (name, args) => {
     let result;
@@ -919,6 +939,7 @@ async function runAgent({ projectId, message, history = [], chapterId = null, on
     const last = ops[ops.length - 1];
     if (last && last.action === name) emit({ type: 'op', action: last.action, label: last.label });
     else if (!result.ok) emit({ type: 'op', action: name, label: `${name}：${result.message || '未执行'}`, failed: true });
+    else if (READ_LABEL[name]) emit({ type: 'op', action: name, label: READ_LABEL[name](result), readonly: true });
     return result;
   };
 
@@ -935,7 +956,8 @@ async function runAgent({ projectId, message, history = [], chapterId = null, on
     }
   };
 
-  for (let round = 0; round < MAX_ROUNDS; round++) {
+  // 轮次上限按当前协议决定：文本协议模型一批一批来，允许更多轮
+  for (let round = 0; round < (useTools ? MAX_ROUNDS : MAX_ROUNDS_TEXT); round++) {
     emit({ type: 'round', n: round + 1 });
     let json;
     try {
@@ -986,13 +1008,28 @@ async function runAgent({ projectId, message, history = [], chapterId = null, on
     const content = assistant.content || '';
     messages.push({ role: 'assistant', content });
 
-    if (!useTools) {
-      const actions = extractActions(content);
-      if (actions.length) {
-        const results = actions.map((a) => runTool(a.tool, a.args || {}));
-        messages.push({ role: 'user', content: `执行结果：\n${results.map((r) => JSON.stringify(r)).join('\n')}\n请继续，或输出总结。` });
-        continue;
+    // 文本协议：模型用 ```json {"tool":...}``` 块下达操作。
+    // 关键：不管当前是不是"以为支持函数调用"的状态，只要模型输出了合法操作块就必须执行。
+    // 之前这里只在 useTools === false 时才解析，于是遇到"接口收下了 tools 参数、模型却不会用"的情况
+    // （实测 deepseek 系），助手明明写好了 read_chapter 却一个都没执行，直接把 JSON 当回答吐给作者。
+    const actions = extractActions(content);
+    if (actions.length) {
+      if (useTools) {
+        // 判定为文本协议模型：后续轮次不再传 tools，并补上协议说明
+        useTools = false;
+        messages.push({ role: 'system', content: TEXT_PROTOCOL_HINT });
+        emit({ type: 'note', text: '该模型不支持函数调用，已自动切换为文本协议（操作照常执行）' });
       }
+      const results = actions.map((a) => runTool(a.tool, a.args || {}));
+      if (results.some((r) => r && r.__finish)) {
+        finishSummary = results.find((r) => r && r.__finish).summary;
+        break;
+      }
+      messages.push({
+        role: 'user',
+        content: `执行结果：\n${results.map((r) => JSON.stringify(r)).join('\n')}\n请继续下一批操作，或输出纯文本总结。`
+      });
+      continue;
     }
 
     finalText = content;
@@ -1001,7 +1038,11 @@ async function runAgent({ projectId, message, history = [], chapterId = null, on
   }
 
   return {
-    reply: finishSummary || finalText || '（模型未完成输出，请再试一次）',
+    // 有一种常见情况：模型把操作都下达完了，却没写总结。这时别回一句"模型没输出"，
+    // 告诉作者操作已经做完，并给一个能接着问的句子。
+    reply: finishSummary || finalText || (ops.length
+      ? `我已经执行了 ${ops.length} 项操作，但这次没来得及写出总结。你可以说「把刚才的结果总结一下」，我接着说。`
+      : '（模型这次没有输出内容，请再试一次）'),
     ops,
     demo: false,
     thinking,

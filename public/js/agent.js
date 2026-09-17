@@ -73,13 +73,17 @@ export function createAgent(ctx) {
     const ops = live.ops.length
       ? `<div class="live-ops" id="liveOps">${live.ops.map((o) => `<span class="live-op">✓ ${esc(o.label || o.action)}</span>`).join('')}</div>`
       : '';
+    const notes = live.notes.length
+      ? `<div class="live-notes">${live.notes.map((n) => `<span class="live-note">· ${esc(n)}</span>`).join('')}</div>`
+      : '';
     const answer = live.answer ? `<div class="live-answer" id="liveAnswer">${esc(live.answer)}</div>` : '';
-    const idle = !live.thinking && !live.answer;
+    const idle = !live.thinking && !live.answer && !live.notes.length;
     return `<div class="bubble assistant">
       <div class="bubble-avatar">✦</div>
       <div class="bubble-body">
         ${thinkBlock(live.thinking, live.thinkMs, true)}
         ${idle ? `<div class="live-status"><span class="dot-typing"><i></i><i></i><i></i></span><em>正在读取项目数据并思考…</em></div>` : ''}
+        ${notes}
         ${ops}
         ${answer}
         <div class="live-foot"><span class="dot-typing sm"><i></i><i></i><i></i></span>已等待 <b id="liveWaited">${waited}</b> 秒 · 可随时点「停止」
@@ -209,6 +213,9 @@ export function createAgent(ctx) {
     } else if (ev.type === 'op') {
       live.ops.push(ev);
       livePaint(true);
+    } else if (ev.type === 'note') {
+      live.notes.push(ev.text);
+      livePaint(true);
     }
   }
 
@@ -229,7 +236,7 @@ export function createAgent(ctx) {
     ctrl = new AbortController();
     pendingText = value;
     pendingStart = Date.now();
-    live = { thinking: '', answer: '', ops: [], round: 1, startedAt: Date.now(), thinkMs: 0, thinkStartAt: 0, lastThinkAt: 0 };
+    live = { thinking: '', answer: '', ops: [], notes: [], round: 1, startedAt: Date.now(), thinkMs: 0, thinkStartAt: 0, lastThinkAt: 0 };
     paint();
     pendingTimer = setInterval(() => {
       const el = root.querySelector('#liveWaited');

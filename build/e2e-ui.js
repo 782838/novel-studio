@@ -37,8 +37,23 @@ const fake = http.createServer((req, res) => {
   let raw = '';
   req.on('data', (c) => { raw += c; });
   req.on('end', () => {
+    const payload = JSON.parse(raw || '{}');
+    const msgs = payload.messages || [];
+    // 模拟「模型不支持函数调用、只在正文里写 ```json 操作块」的模型（实测 deepseek 系如此）
+    const protocol = msgs.some((m) => m.role === 'user' && String(m.content).includes('协议测试'));
+    const gotResults = msgs.some((m) => m.role === 'user' && String(m.content).startsWith('执行结果：'));
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     const put = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
+    if (protocol) {
+      if (!gotResults) {
+        put({ choices: [{ delta: { reasoning_content: '先把要记的东西列出来。' } }] });
+        put({ choices: [{ delta: { content: '我来记两条备忘：\n\n```json\n{"tool":"add_note","args":{"title":"界面协议测试A","content":"来自界面测试"}}\n```\n```json\n{"tool":"add_note","args":{"title":"界面协议测试B","content":"第二条"}}\n```' } }] });
+      } else {
+        put({ choices: [{ delta: { content: '两条备忘都记好了，你可以去备忘页看看。' } }] });
+      }
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    }
     put({ choices: [{ delta: { reasoning_content: '先看一遍现有的大纲和章节节奏。' } }] });
     put({ choices: [{ delta: { reasoning_content: '中段偏慢，得给一个转折。' } }] });
     const chunks = ['这个', '故事的', '节奏', '问题', '在于', '中段', '缺少', '一次', '转折', '。'];
@@ -189,6 +204,32 @@ const putJSON = (url, body) => fetch(BASE + url, {
     };
   });
   check('发送中可停止、能看见思考过程、停止后落条并复原', r.ok, r.info);
+
+  /* ---------------------------------------- 6. 文本协议模型：操作照常执行、界面不乱 */
+  console.log('\n== 6. 文本协议模型（不会 function calling）==');
+  r = await run(async () => {
+    const sleep = (ms) => new Promise((x) => setTimeout(x, ms));
+    const panel = document.getElementById('agentPanel');
+    if (!panel.classList.contains('open')) document.getElementById('btnToggleAgent').click();
+    await sleep(400);
+    document.getElementById('agentInput').value = '协议测试：帮我记两条备忘';
+    document.getElementById('agentSend').click();
+    let finished = false;
+    for (let i = 0; i < 40 && !finished; i++) {     // 最多等 20 秒
+      await sleep(500);
+      if (document.getElementById('agentSend').textContent.trim() === '发送') finished = true;
+    }
+    const bubbles = [...document.querySelectorAll('#agentMsgs .bubble.assistant')];
+    const last = bubbles[bubbles.length - 1];
+    const text = last ? last.textContent : '';
+    return {
+      ok: finished && /两条备忘都记好了/.test(text) && text.includes('已执行 2 项操作')
+        && !text.includes('```') && !text.includes('<br>'),
+      info: `跑完=${finished} 有总结=${/两条备忘都记好了/.test(text)} 有操作清单=${text.includes('已执行 2 项操作')}`
+        + ` 裸露代码块=${text.includes('```')} 字面<br>=${text.includes('<br>')} 末尾=${JSON.stringify(text.slice(-46))}`
+    };
+  });
+  check('操作被真正执行、给出总结、界面无乱码', r.ok, r.info);
 
   try { win.destroy(); } catch (_) { /* ignore */ }
   fake.close();

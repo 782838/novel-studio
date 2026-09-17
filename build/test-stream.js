@@ -29,6 +29,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* ------------------------------------------------ 假模型：会说"思考"、会调工具、能拖时间 */
 const SLOW_MARK = '慢慢说';
+const PROTO_MARK = '协议测试';   // 触发「模型不支持函数调用、只写文本协议块」的场景
+const LONG_MARK = '协议测试长任务';   // 连续 10 轮操作，验证轮次上限
 const fake = http.createServer((req, res) => {
   let raw = '';
   req.on('data', (c) => { raw += c; });
@@ -37,8 +39,42 @@ const fake = http.createServer((req, res) => {
     const msgs = payload.messages || [];
     const toolRound = msgs.some((m) => m.role === 'tool');
     const slow = msgs.some((m) => m.role === 'user' && String(m.content).includes(SLOW_MARK));
+    const protocol = msgs.some((m) => m.role === 'user' && String(m.content).includes(PROTO_MARK));
+    const gotResults = msgs.some((m) => m.role === 'user' && String(m.content).startsWith('执行结果：'));
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
     const put = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
+
+    // 真实故障场景：接口收下了 tools 参数，但模型根本不返回 tool_calls，
+    // 只在正文里写 ```json {"tool":...}``` （实测 deepseek 系就是这样）
+    if (protocol) {
+      // 长任务：连续多轮下达操作，用来验证轮次上限（以前 8 轮就断，长任务做不完）
+      if (msgs.some((m) => m.role === 'user' && String(m.content).includes(LONG_MARK))) {
+        const done = msgs.filter((m) => m.role === 'user' && String(m.content).startsWith('执行结果：')).length;
+        if (done < 10) {
+          put({ choices: [{ delta: { content: `第 ${done + 1} 条：\n\n\`\`\`json\n{"tool":"add_note","args":{"title":"长任务备忘${done + 1}","content":"分批写入"}}\n\`\`\`` } }] });
+        } else {
+          put({ choices: [{ delta: { content: '十批操作都做完了，这就是总结。' } }] });
+        }
+        res.write('data: [DONE]\n\n');
+        return res.end();
+      }
+      if (!gotResults) {
+        put({ choices: [{ delta: { reasoning_content: '我需要先把要写的东西列清楚。' } }] });
+        const text = '我来记两条备忘，顺便拉一次上下文：\n\n'
+          + '```json\n{"tool":"add_note","args":{"title":"协议测试备忘A","content":"由文本协议写入"}}\n```\n'
+          + '```json\n{"tool":"add_note","args":{"title":"协议测试备忘B","content":"第二条"}}\n```\n'
+          + '```json\n{"tool":"get_project_context","args":{}}\n```';
+        const mid = Math.floor(text.length / 2);
+        put({ choices: [{ delta: { content: text.slice(0, mid) } }] });   // 故意分片，验证累积
+        put({ choices: [{ delta: { content: text.slice(mid) } }] });
+      } else {
+        put({ choices: [{ delta: { reasoning_content: '结果拿到了，给作者一个总结。' } }] });
+        put({ choices: [{ delta: { content: '已经帮你记好两条备忘了，顺带刷新了项目上下文。' } }] });
+      }
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    }
+
     if (!toolRound) {
       put({ choices: [{ delta: { reasoning_content: '先看看项目里有什么。' } }] });
       put({ choices: [{ delta: { reasoning_content: '需要写一条备忘记录下来。' } }] });
@@ -192,8 +228,43 @@ const readStore = () => JSON.parse(fs.readFileSync(path.join(DATA, 'store.json')
   check('停止前已经生成的部分被保留', !!stopped && stopped.content.includes('这段'), (stopped && stopped.content || '').slice(0, 60));
   check('作者的问题本身没有被吞', msgs2.some((m) => m.role === 'user' && String(m.content).includes(SLOW_MARK)));
 
-  /* ---------------------------------------------- 3. 置顶 / 伏笔 / 改名 */
-  console.log('\n== 3. 置顶、伏笔、改名 ==');
+  /* ---------------------------------------------- 3. 文本协议：模型不会函数调用时，操作也必须真的执行 */
+  console.log('\n== 3. 文本协议模型（不会 function calling）==');
+  const pSeen = [];
+  const pKinds = new Set();
+  const pFinal = await streamChat(
+    { projectId, message: `${PROTO_MARK}：帮我记两条备忘` },
+    { onEvent: (ev) => { pSeen.push(ev); pKinds.add(ev.type); } }
+  );
+  const pOps = pSeen.filter((e) => e.type === 'op');
+  check('模型写的 ```json 操作块被真正执行了', pOps.length >= 2, JSON.stringify(pOps.map((o) => o.label)));
+  check('界面收到「已切换文本协议」的说明', pSeen.some((e) => e.type === 'note' && /文本协议/.test(e.text || '')),
+    JSON.stringify(pSeen.filter((e) => e.type === 'note')));
+  check('只读工具也留下痕迹（读了上下文）', pOps.some((o) => /上下文/.test(o.label || '')), JSON.stringify(pOps.map((o) => o.label)));
+  check('执行后继续下一轮（不是把 JSON 当回答）', pKinds.has('round') && pSeen.filter((e) => e.type === 'round').length >= 2,
+    `round 数=${pSeen.filter((e) => e.type === 'round').length}`);
+  check('最终回答是模型的总结，不是原始 JSON', !!pFinal && /已经帮你记好两条备忘/.test(pFinal.reply || '')
+    && !/```/.test(pFinal.reply || '') && !/"tool"/.test(pFinal.reply || ''), (pFinal && pFinal.reply || '').slice(0, 80));
+  await sleep(400);
+  db = readStore();
+  const protoNotes = db.notes.filter((n) => n.projectId === projectId && /^协议测试备忘/.test(n.title || ''));
+  check('两条备忘真的写进了数据', protoNotes.length === 2, `找到 ${protoNotes.length} 条：` + protoNotes.map((n) => n.title).join('、'));
+
+  // 长任务：像"把这条副线的所有章节读完再整合"那样，需要十几轮
+  const lSeen = [];
+  const lFinal = await streamChat(
+    { projectId, message: `${LONG_MARK}：分批写十条备忘` },
+    { onEvent: (ev) => lSeen.push(ev) }
+  );
+  const lOps = lSeen.filter((e) => e.type === 'op' && /长任务备忘/.test(e.label || ''));
+  check('长任务能连续跑完 10 轮（轮次上限放宽）', lOps.length === 10, `实际执行 ${lOps.length} 批`);
+  check('长任务最后也给出了总结', !!lFinal && /十批操作都做完了/.test(lFinal.reply || ''), (lFinal && lFinal.reply || '').slice(0, 60));
+  await sleep(400);
+  db = readStore();
+  check('十条备忘都落库了', db.notes.filter((n) => n.projectId === projectId && /^长任务备忘/.test(n.title || '')).length === 10);
+
+  /* ---------------------------------------------- 4. 置顶 / 伏笔 / 改名 */
+  console.log('\n== 4. 置顶、伏笔、改名 ==');
   db = readStore();
   const note = db.notes.find((n) => n.projectId === projectId);
   const foreshadow = db.foreshadow.find((f) => f.projectId === projectId);

@@ -36,7 +36,11 @@ if (fs.existsSync(logFile)) fs.rmSync(logFile, { force: true });
 // 宿主环境带了 ELECTRON_RUN_AS_NODE=1，会让 Electron 退化成纯 Node，必须剔除
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
-const child = spawn(EXE, [], { detached: true, stdio: 'ignore', env: childEnv });
+// 在受限环境（CI / 沙箱 / 远程会话）里 Chromium 的沙箱和 GPU 进程会直接崩掉整个应用，
+// 表现为「窗口创建后就退出」，于是端口连不上、冒烟失败。加这几个开关让它在受限环境也能起来。
+// 用户正常双击启动时不需要这些参数，也不受影响。
+const args = ['--no-sandbox', '--in-process-gpu', '--disable-gpu-sandbox', '--disable-gpu'];
+const child = spawn(EXE, args, { detached: true, stdio: 'ignore', env: childEnv });
 child.unref();
 const pid = child.pid;
 console.log('  pid =', pid);

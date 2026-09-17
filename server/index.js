@@ -774,6 +774,90 @@ on('POST', '/api/ai/chat', async ({ res, body }) => {
   ok(res, { ...result, latency: Date.now() - t0 });
 });
 
+/**
+ * 流式对话（SSE）：把「思考过程 / 正文 / 工具执行」实时推给前端，
+ * 并支持前端随时断开（点「停止」）——断开即中止上游请求，已产生的部分会存下来。
+ * 事件：start / round / thinking / answer / op / done / stopped / error
+ */
+on('POST', '/api/ai/chat/stream', async ({ req, res, body }) => {
+  const { projectId, chapterId } = body;
+  const text = String(body.message || '').trim();
+  if (!projectId) return fail(res, '缺少 projectId');
+  if (!text) return fail(res, '内容为空');
+
+  const history = store.where('messages', (m) => m.projectId === projectId)
+    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+    .slice(-10)
+    .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
+
+  const t0 = Date.now();
+  // 先把作者的问题落盘——就算接下来 AI 出错或被停止，问题也不会"消失"
+  store.insert('messages', { projectId, role: 'user', content: text });
+  store.flush();
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+    'Access-Control-Allow-Origin': '*'
+  });
+
+  const write = (ev) => { try { res.write(`data: ${JSON.stringify(ev)}\n\n`); } catch (_) { /* 前端已断开 */ } };
+  // 心跳：长时间只思考不产出时，避免中间层把这根连接掐掉（这正是"经常断"的常见原因）
+  const beat = setInterval(() => { try { res.write(': ping\n\n'); } catch (_) { /* ignore */ } }, 10000);
+
+  const ctrl = new AbortController();
+  let clientGone = false;
+  const onClose = () => { clientGone = true; ctrl.abort(); };
+  // 客户端点「停止」会直接断开连接：req/res 都要听（req 的 close 在响应结束前不一定触发）
+  req.on('close', onClose);
+  res.on('close', onClose);
+
+  let partial = '';
+  const doneOps = [];
+  const remember = (ev) => {
+    if (ev.type === 'round') partial = '';
+    else if (ev.type === 'answer' && ev.tentative) partial += ev.text;
+    else if (ev.type === 'op' && !ev.failed) doneOps.push({ action: ev.action, label: ev.label, at: Date.now() });
+  };
+
+  try {
+    write({ type: 'start', at: t0 });
+    const result = await ai.runAgent({
+      projectId, message: text, history, chapterId: chapterId || null,
+      signal: ctrl.signal,
+      onEvent: (ev) => { remember(ev); write(ev); }
+    });
+    const latency = Date.now() - t0;
+    const thinking = String(result.thinking || '').slice(0, 8000);
+    store.insert('messages', {
+      projectId, role: 'assistant', content: result.reply, ops: result.ops,
+      thinking, thinkMs: result.thinkMs || 0, latency
+    });
+    store.flush();
+    write({
+      type: 'done', reply: result.reply, ops: result.ops, demo: !!result.demo,
+      thinking: thinking.length > 1200 ? `${thinking.slice(0, 1200)}\n…（已截断，完整思考过程见本地数据）` : thinking,
+      thinkMs: result.thinkMs || 0, latency
+    });
+  } catch (err) {
+    const stopped = clientGone || (err && /abort/i.test(err.message || ''));
+    const reply = stopped
+      ? (partial.trim() ? `（已手动停止；下面是停止前已经生成的部分）\n\n${partial.trim()}` : '已停止这次回答。')
+      : `这次调用出了问题：${err.message}\n\n你的问题已经保留在上面，可以直接重发一次；如果反复失败，请到「设置 → 模型」检查接口地址、Key 与模型名。`;
+    if (!stopped) console.error('[ai/chat/stream]', err.message);
+    store.insert('messages', { projectId, role: 'assistant', content: reply, ops: stopped ? doneOps : [], failed: !stopped, stopped });
+    store.flush();
+    write({ type: stopped ? 'stopped' : 'error', message: reply, ops: stopped ? doneOps : [], latency: Date.now() - t0 });
+  } finally {
+    clearInterval(beat);
+    if (req.off) req.off('close', onClose);
+    if (res.off) res.off('close', onClose);
+    try { res.end(); } catch (_) { /* ignore */ }
+  }
+});
+
 on('POST', '/api/ai/generate', async ({ res, body }) => {
   const { projectId, kind, params } = body;
   if (!projectId) return fail(res, '缺少 projectId');

@@ -61,7 +61,7 @@ export function dashboard(ctx) {
       <div class="page">
         <section class="hero-card">
           <div class="hero-main">
-            <input class="hero-title" id="heroTitle" value="${esc(p.title)}" placeholder="作品名" />
+            <input class="hero-title" id="heroTitle" value="${esc(p.title)}" placeholder="作品名" title="直接在这里改作品名（也可用顶栏「✎ 改名」）" />
             <div class="hero-meta">
               <input class="hero-genre" id="heroGenre" value="${esc(p.genre || '')}" placeholder="类型标签，如：都市悬疑" />
               <span class="dot-sep">·</span>
@@ -118,7 +118,9 @@ export function dashboard(ctx) {
 
     mount(root, c) {
       const patchProject = debounce((patchObj) => {
-        api.patchProject(c.projectId, patchObj).catch((e) => toast(e.message, 'error'));
+        api.patchProject(c.projectId, patchObj)
+          .then(() => c.refreshProjects())   // 顶栏下拉框跟着一起改名
+          .catch((e) => toast(e.message, 'error'));
       }, 600);
 
       const bindHero = (id, key) => {
@@ -248,9 +250,10 @@ function outlineTree(nodes, parentId, ctx) {
         <div class="tree-row ${ctx.sel.nodeId === n.id ? 'active' : ''}" data-id="${n.id}" draggable="true">
           <button class="caret" data-act="toggle" data-id="${n.id}" aria-label="展开/折叠">${subs.length ? (collapsed ? '▸' : '▾') : '·'}</button>
           <span class="type-badge t-${esc(n.type)}">${esc(ctx.meta.typeLabel[n.type] || n.type)}</span>
-          <span class="tree-title">${esc(n.title)}</span>
+          <span class="tree-title" title="双击可直接改名">${esc(n.title)}</span>
           ${kidsCount ? `<span class="count-pill">${kidsCount}</span>` : ''}
           <span class="row-actions">
+            <button data-act="rename" data-id="${n.id}" title="重命名（也可双击标题）">✎</button>
             <button data-act="add" data-id="${n.id}" title="新增子节点">＋</button>
             <button data-act="del" data-id="${n.id}" title="删除节点（含子级）">✕</button>
           </span>
@@ -258,6 +261,44 @@ function outlineTree(nodes, parentId, ctx) {
         ${(!collapsed) ? outlineTree(nodes, n.id, ctx) : ''}
       </li>`;
   }).join('')}</ul>`;
+}
+
+/** 大纲节点就地改名：回车/失焦保存，Esc 取消 */
+function startRename(row, id, c) {
+  const titleEl = row.querySelector('.tree-title');
+  if (!titleEl || row.querySelector('.rename-input')) return;
+  const old = titleEl.textContent;
+  const wasDraggable = row.getAttribute('draggable');
+  row.setAttribute('draggable', 'false');   // 拖拽会抢走输入框的选区
+
+  const input = document.createElement('input');
+  input.className = 'rename-input';
+  input.value = old;
+  titleEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const val = input.value.trim();
+    if (save && val && val !== old) {
+      await c.patch('outline', id, { title: val });   // 内部会重绘，无需手动恢复
+      toast('已改名', 'success');
+    } else {
+      row.setAttribute('draggable', wasDraggable || 'true');
+      c.render();
+    }
+  };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('dblclick', (e) => e.stopPropagation());
+  input.addEventListener('blur', () => finish(true));
 }
 
 function bindTree(root, c) {
@@ -270,6 +311,14 @@ function bindTree(root, c) {
       if (act) return;
       c.sel.nodeId = id;
       c.render();
+    });
+
+    // 双击标题 = 就地改名
+    row.addEventListener('dblclick', (e) => {
+      const t = e.target.closest('.tree-title');
+      if (!t) return;
+      e.preventDefault();
+      startRename(row, id, c);
     });
 
     row.addEventListener('dragstart', (e) => {
@@ -285,7 +334,7 @@ function bindTree(root, c) {
       const dragId = e.dataTransfer.getData('text/plain');
       if (!dragId || dragId === id) return;
       if (hasDescendant(d.outline, dragId, id)) return toast('不能移动到自己的子节点下', 'error');
-      await c.patch('outline', dragId, { parentId: id });
+      await c.patch('outline', dragId, { parentId: id }, { silent: true });
       await c.reload();
       toast('已调整层级', 'success');
     });
@@ -297,6 +346,14 @@ function bindTree(root, c) {
       const id = btn.dataset.id;
       if (c.collapsed.has(id)) c.collapsed.delete(id); else c.collapsed.add(id);
       c.render();
+    });
+  });
+
+  root.querySelectorAll('[data-act="rename"]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const row = btn.closest('.tree-row');
+      if (row) startRename(row, btn.dataset.id, c);
     });
   });
 
@@ -409,7 +466,8 @@ export function mountNodeEditor(root, c) {
   const node = c.data.outline.find((n) => n.id === c.sel.nodeId);
   if (!node) return;
 
-  const patchNode = debounce((p) => c.patch('outline', node.id, p).then(() => { c.dirtyLocal = true; }), 500);
+  // 边打字边存：silent 避免重绘打断光标
+  const patchNode = debounce((p) => c.patch('outline', node.id, p, { silent: true }).then(() => { c.dirtyLocal = true; }), 500);
 
   root.querySelector('#nodeTitle').addEventListener('input', (e) => patchNode({ title: e.target.value }));
   root.querySelector('#nodeSummary').addEventListener('input', (e) => patchNode({ summary: e.target.value }));
@@ -648,7 +706,7 @@ export function openCharacter(ctx, charId) {
         { label: '编辑', kind: 'primary', keepOpen: true, onClick: () => {
           openForm({
             title: `编辑 ${c.name}`, width: 620, fields: characterFields(), values: c, okText: '保存',
-            onSubmit: async (v) => { await ctx.patch('characters', charId, v); toast('已保存', 'success'); ctx.reload(); render(); }
+            onSubmit: async (v) => { await ctx.patch('characters', charId, v); toast('已保存', 'success'); }
           });
         } }
       ],
@@ -766,8 +824,8 @@ export function lines(ctx) {
         const i = sibs.findIndex((x) => x.id === beat.id);
         const j = Number(b.dataset.dir) > 0 ? i - 1 : i + 1;
         if (j < 0 || j >= sibs.length) return;
-        await c.patch('beats', beat.id, { order: sibs[j].order });
-        await c.patch('beats', sibs[j].id, { order: beat.order });
+        await c.patch('beats', beat.id, { order: sibs[j].order }, { silent: true });
+        await c.patch('beats', sibs[j].id, { order: beat.order }, { silent: true });
         await c.reload();
       }));
 
@@ -930,7 +988,7 @@ export function chapters(ctx) {
       if (!cur) return;
 
       const save = debounce(async (patchObj) => {
-        await c.patch('chapters', cur.id, patchObj);
+        await c.patch('chapters', cur.id, patchObj, { silent: true });   // 静默：不重建编辑器，保住光标
         c.syncLocal();
       }, 700);
 
@@ -977,7 +1035,7 @@ export function chapters(ctx) {
                 buttons: [
                   { label: '放弃', kind: 'ghost' },
                   { label: '插入到正文', kind: 'primary', onClick: async () => {
-                    await c.patch('chapters', cur.id, { content: contentEl.value + sep + res.text });
+                    await c.patch('chapters', cur.id, { content: contentEl.value + sep + res.text }, { silent: true });
                     await c.reload();
                     toast('已插入', 'success');
                   } }

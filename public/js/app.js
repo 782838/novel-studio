@@ -90,8 +90,15 @@ const ctx = {
     return item;
   },
 
-  async patch(coll, id, body) {
-    return api.patchItem(coll, id, body);
+  /**
+   * 修改一条数据。
+   * 默认会重新拉取并重绘（否则像「备忘置顶」「伏笔已回收」这类操作，服务端改了但界面纹丝不动，
+   * 看起来就像"点了没反应"）。正在输入框里自动保存的场景请传 { silent: true }，避免重建 DOM 打断输入。
+   */
+  async patch(coll, id, body, opts = {}) {
+    const res = await api.patchItem(coll, id, body);
+    if (!opts.silent) await ctx.reload();
+    return res;
   },
 
   async remove(coll, id) {
@@ -102,6 +109,7 @@ const ctx = {
   render,
   askAI,
   toggleAgent,
+  refreshProjects: () => loadProjects(),
   refreshSettings: async () => {
     state.settings = await api.settings();
     // 顶栏徽章只在启动时设置过一次，中途保存 Key 会一直显示"演示模式"——这里同步刷新
@@ -214,6 +222,40 @@ async function newProject() {
       const p = await api.createProject(v);
       await selectProject(p.id, true);
       toast('作品已创建', 'success');
+    }
+  });
+}
+
+/** 重命名当前作品（顺带可改类型、目标字数、一句话故事） */
+async function renameCurrentProject() {
+  const p = state.projects.find((x) => x.id === state.projectId);
+  if (!p) return toast('请先选择要改名的作品', 'error');
+  const full = state.data?.project || {};
+  openForm({
+    title: '作品改名', subtitle: `当前：${p.title}`, width: 520, okText: '保存',
+    fields: [
+      { key: 'title', label: '作品名', placeholder: '如：雾隐城' },
+      { key: 'genre', label: '类型标签', placeholder: '如：东方奇幻 / 悬疑' },
+      { key: 'targetWords', label: '目标字数', type: 'number' },
+      { key: 'synopsis', label: '一句话故事', type: 'textarea', rows: 3, hint: '谁，在什么处境下，想要什么，代价是什么' }
+    ],
+    values: {
+      title: full.title || p.title,
+      genre: full.genre || '',
+      targetWords: full.targetWords || 200000,
+      synopsis: full.synopsis || ''
+    },
+    onSubmit: async (v) => {
+      if (!String(v.title || '').trim()) { toast('作品名不能为空', 'error'); return false; }
+      await api.patchProject(p.id, {
+        title: v.title.trim(),
+        genre: v.genre,
+        targetWords: Number(v.targetWords) || 0,
+        synopsis: v.synopsis
+      });
+      await loadProjects();                       // 顶栏下拉框同步新名字
+      await selectProject(p.id, false);           // 重新拉取作品数据并重绘
+      toast('已改名', 'success');
     }
   });
 }
@@ -677,6 +719,7 @@ async function boot() {
   const sel = document.getElementById('projectSelect');
   sel.addEventListener('change', () => selectProject(sel.value));
   document.getElementById('btnNewProject').addEventListener('click', () => newProject());
+  document.getElementById('btnRenameProject').addEventListener('click', renameCurrentProject);
   document.getElementById('btnDeleteProject').addEventListener('click', deleteCurrentProject);
   document.getElementById('btnExport').addEventListener('click', exportProject);
   document.getElementById('btnImport').addEventListener('click', importProject);

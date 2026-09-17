@@ -1,7 +1,7 @@
 {
   "name": "novel-studio",
   "productName": "小说创作工作台",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "private": true,
   "description": "小说辅助创作工作台：大纲记忆与补全、角色集、主次线路梳理、可操作的 AI 智能体",
   "author": "Novel Studio",
@@ -14,7 +14,9 @@
     "icon": "node build/make-icon.js",
     "smoke": "node build/smoke_embedded.js",
     "smoke:packaged": "node build/smoke_packaged.js",
-    "release": "node build/publish.js"
+    "release": "node build/publish.js",
+    "test:stream": "node build/test-stream.js",
+    "test:ui": "electron build/e2e-ui.js"
   },
   "engines": {
     "node": ">=18"

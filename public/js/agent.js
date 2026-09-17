@@ -27,9 +27,12 @@ export function createAgent(ctx) {
   const root = document.getElementById('agentPanel');
   let built = false;
   let busy = false;
+  let ctrl = null;          // 用于「停止」：中断这次请求
   let pendingText = '';
   let pendingStart = 0;
   let pendingTimer = null;
+  let live = null;          // 流式中的现场（思考过程 / 正文 / 已执行操作）
+  let lastPaint = 0;
 
   function statusHtml() {
     const configured = ctx.settings.hasKey;
@@ -38,29 +41,66 @@ export function createAgent(ctx) {
     </span>`;
   }
 
-  function msgsHtml(pending) {
+  const secs = (ms) => (ms / 1000).toFixed(1);
+
+  /** 助手「思考过程」折叠块——实时与历史消息共用 */
+  function thinkBlock(thinking, thinkMs, open) {
+    if (!thinking) return '';
+    return `<details class="think"${open ? ' open' : ''}>
+      <summary>🧠 思考过程${thinkMs ? `（${secs(thinkMs)} 秒）` : ''}</summary>
+      <div class="think-body" id="liveThink">${esc(thinking)}</div>
+    </details>`;
+  }
+
+  function msgsHtml() {
     const msgs = ctx.data.messages || [];
     // 作者刚发出、服务端还在处理的那条问题——必须立刻显示，否则看起来像"被吞了"
-    const opt = pending && pendingText
+    const mine = pendingText
       ? `<div class="bubble user"><div class="bubble-body plain">${esc(pendingText)}</div></div>` : '';
-    if (!msgs.length && !pending) {
+    if (!msgs.length && !pendingText && !live) {
       return `<div class="agent-welcome">
         <div class="welcome-glyph">✦</div>
         <h4>我能读到你项目里的一切</h4>
         <p>大纲、角色、线路、设定都会进入我的上下文；章节会带标题和开头，你正打开的那一章我会直接读到全文，其它章节你说一声我就能去读。你既可以让我想，也可以让我直接动手改——新建角色、补大纲、铺节拍都行。</p>
       </div>`;
     }
-    const wait = pending ? `<div class="bubble assistant pending">
-      <span class="dot-typing"><i></i><i></i><i></i></span><em id="pendingWait">助手正在读取项目数据并思考…（0 秒）</em>
-    </div>` : '';
-    return msgs.map((m) => bubble(m)).join('') + opt + wait;
+    return msgs.map((m) => bubble(m)).join('') + mine + liveHtml();
+  }
+
+  function liveHtml() {
+    if (!live) return '';
+    const waited = Math.round((Date.now() - live.startedAt) / 1000);
+    const ops = live.ops.length
+      ? `<div class="live-ops" id="liveOps">${live.ops.map((o) => `<span class="live-op">✓ ${esc(o.label || o.action)}</span>`).join('')}</div>`
+      : '';
+    const answer = live.answer ? `<div class="live-answer" id="liveAnswer">${esc(live.answer)}</div>` : '';
+    const idle = !live.thinking && !live.answer;
+    return `<div class="bubble assistant">
+      <div class="bubble-avatar">✦</div>
+      <div class="bubble-body">
+        ${thinkBlock(live.thinking, live.thinkMs, true)}
+        ${idle ? `<div class="live-status"><span class="dot-typing"><i></i><i></i><i></i></span><em>正在读取项目数据并思考…</em></div>` : ''}
+        ${ops}
+        ${answer}
+        <div class="live-foot"><span class="dot-typing sm"><i></i><i></i><i></i></span>已等待 <b id="liveWaited">${waited}</b> 秒 · 可随时点「停止」
+        </div>
+      </div>
+    </div>`;
   }
 
   function bubble(m) {
     const mine = m.role === 'user';
-    return `<div class="bubble ${mine ? 'user' : 'assistant'}">
-      ${mine ? `<div class="bubble-body plain">${esc(m.content)}</div>`
-        : `<div class="bubble-avatar">✦</div><div class="bubble-body">${md(m.content)}${opsHtml(m.ops)}</div>`}
+    if (mine) return `<div class="bubble user"><div class="bubble-body plain">${esc(m.content)}</div></div>`;
+    const meta = [];
+    if (m.thinkMs) meta.push(`思考 ${secs(m.thinkMs)} 秒`);
+    if (m.latency) meta.push(`用时 ${secs(m.latency)} 秒`);
+    return `<div class="bubble assistant">
+      <div class="bubble-avatar">✦</div>
+      <div class="bubble-body">
+        ${thinkBlock(m.thinking, m.thinkMs, false)}
+        ${md(m.content)}${opsHtml(m.ops)}
+        ${meta.length ? `<div class="bubble-meta">${meta.join(' · ')}</div>` : ''}
+      </div>
     </div>`;
   }
 
@@ -95,7 +135,9 @@ export function createAgent(ctx) {
       </div>`;
 
     root.querySelectorAll('.quick-chip').forEach((b) => b.addEventListener('click', () => send(b.dataset.q)));
+    // 一个按钮两副面孔：空闲时「发送」，回答中变「停止」
     root.querySelector('#agentSend').addEventListener('click', () => {
+      if (busy) return stop();
       const el = root.querySelector('#agentInput');
       send(el.value);
       el.value = '';
@@ -103,6 +145,7 @@ export function createAgent(ctx) {
     root.querySelector('#agentInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
+        if (busy) return toast('助手正在回答，可先点「停止」再发下一条', 'info');
         send(e.target.value);
         e.target.value = '';
       }
@@ -118,45 +161,113 @@ export function createAgent(ctx) {
     });
   }
 
-  function paint(pending = false) {
+  /** 按钮在「发送 / 停止」之间切换 */
+  function syncSend() {
+    const btn = root.querySelector('#agentSend');
+    if (!btn) return;
+    btn.textContent = busy ? '■ 停止' : '发送';
+    btn.className = `btn sm ${busy ? 'danger' : 'primary'}`;
+    btn.title = busy ? '停止这次回答' : '发送（Ctrl + Enter）';
+    btn.disabled = false;   // 一度点过「停止」的话，这里要把它解回来，否则之后再发不出去
+  }
+
+  function paint() {
     if (!built) build();
     const st = root.querySelector('#aiStatus');
     if (st) st.outerHTML = statusHtml();
     const box = root.querySelector('#agentMsgs');
-    box.innerHTML = msgsHtml(pending);
-    box.scrollTop = box.scrollHeight;
+    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 140;
+    box.innerHTML = msgsHtml();
+    if (nearBottom) box.scrollTop = box.scrollHeight;
+    syncSend();
+  }
+
+  /** 流式期间约 10fps 重绘，既不卡又能实时看到思考与正文 */
+  function livePaint(force) {
+    const now = Date.now();
+    if (!force && now - lastPaint < 90) return;
+    lastPaint = now;
+    paint();
+  }
+
+  function onEvent(ev) {
+    if (!live) return;
+    if (ev.type === 'round') {
+      live.answer = '';        // 上一轮如果只是"下达操作指令"，这里清掉，避免误当成回答
+      live.round = ev.n || live.round + 1;
+      livePaint(true);
+    } else if (ev.type === 'thinking') {
+      const now = Date.now();
+      if (!live.thinkStartAt) live.thinkStartAt = now;
+      live.lastThinkAt = now;
+      live.thinkMs = Math.max(0, now - live.thinkStartAt);
+      live.thinking += ev.text;
+      livePaint();
+    } else if (ev.type === 'answer') {
+      live.answer += ev.text;
+      livePaint();
+    } else if (ev.type === 'op') {
+      live.ops.push(ev);
+      livePaint(true);
+    }
+  }
+
+  function stop() {
+    if (!busy) return;
+    if (ctrl) ctrl.abort();
+    const btn = root.querySelector('#agentSend');
+    if (btn) { btn.textContent = '正在停止…'; btn.disabled = true; }
   }
 
   async function send(text) {
     const value = String(text || '').trim();
-    if (!value || busy) return;
+    if (busy) return toast('助手正在回答，可先点「停止」再发下一条', 'info');
+    if (!value) return;
     if (!ctx.projectId) return toast('请先选择或新建一部作品', 'error');
 
     busy = true;
+    ctrl = new AbortController();
     pendingText = value;
     pendingStart = Date.now();
-    root.querySelector('#agentSend').disabled = true;
-    paint(true);
+    live = { thinking: '', answer: '', ops: [], round: 1, startedAt: Date.now(), thinkMs: 0, thinkStartAt: 0, lastThinkAt: 0 };
+    paint();
     pendingTimer = setInterval(() => {
-      const el = root.querySelector('#pendingWait');
-      if (el) el.textContent = `助手正在读取项目数据并思考…（${Math.round((Date.now() - pendingStart) / 1000)} 秒，长问题可能要等一两分钟）`;
+      const el = root.querySelector('#liveWaited');
+      if (el) el.textContent = Math.round((Date.now() - pendingStart) / 1000);
     }, 1000);
+
+    let result = null;
+    let aborted = false;
     try {
-      const res = await api.aiChat(ctx.projectId, value, ctx.sel.chapterId).catch((e) => {
-        // 网络错误时补一条失败提示；问题本身服务端已落盘，不会消失
-        return { reply: `调用失败：${e.message}\n\n你的问题已经保留在上面，可以直接重发，或到「设置 → 模型」检查接口地址、Key 与模型名。`, ops: [], failed: true };
+      result = await api.aiChatStream(ctx.projectId, value, ctx.sel.chapterId, {
+        signal: ctrl.signal,
+        onEvent
       });
-      await ctx.reload();
-      if (res.demo) toast('演示模式：尚未配置可用的模型', 'info');
+    } catch (err) {
+      aborted = err && (err.name === 'AbortError' || /abort/i.test(err.message || ''));
+      if (!aborted) {
+        result = {
+          type: 'error',
+          message: `调用失败：${err.message}\n\n你的问题已经保留在上面，可以直接重发，或到「设置 → 模型」检查接口地址、Key 与模型名。`
+        };
+      }
     } finally {
       clearInterval(pendingTimer);
       pendingTimer = null;
       pendingText = '';
       busy = false;
-      const btn = root.querySelector('#agentSend');
-      if (btn) btn.disabled = false;
+      live = null;
+      ctrl = null;
+      // 服务端在收到停止后才会落盘「已停止」那条消息，稍等一下再刷新
+      if (aborted) await new Promise((r) => setTimeout(r, 350));
+      await ctx.reload();
       paint();
     }
+
+    if (!result) return;
+    if (result.type === 'done' && result.demo) toast('演示模式：尚未配置可用的模型', 'info');
+    if (result.type === 'stopped') toast('已停止这次回答', 'info');
+    if (result.type === 'error') toast('调用失败，问题已保留', 'error');
   }
 
   return { paint, send };

@@ -733,6 +733,41 @@ body.agent-open .agent-panel { width: 396px; flex-basis: 396px; border-left-colo
 .ops li { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-2); margin-bottom: 3px; }
 .op-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); flex: 0 0 auto; }
 
+/* --- 流式回答：思考过程 / 实时正文 / 实时操作 --- */
+.think { margin: 0 0 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-3); overflow: hidden; }
+.think > summary {
+  cursor: pointer; padding: 5px 9px; font-size: 11.5px; color: var(--muted);
+  list-style: none; user-select: none;
+}
+.think > summary::-webkit-details-marker { display: none; }
+.think > summary::before { content: '▸ '; font-size: 10px; }
+.think[open] > summary::before { content: '▾ '; }
+.think-body {
+  max-height: 220px; overflow-y: auto; padding: 0 10px 8px;
+  font-size: 11.5px; line-height: 1.7; color: var(--muted); white-space: pre-wrap;
+}
+.live-status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-style: italic; }
+.live-ops { display: flex; flex-direction: column; gap: 3px; margin: 6px 0 4px; }
+.live-op {
+  font-size: 11.5px; color: #2f6b4f; background: #eaf6ef; border: 1px solid #cfe8db;
+  border-radius: 6px; padding: 2px 7px; align-self: flex-start;
+}
+.live-answer { white-space: pre-wrap; }
+.live-foot {
+  display: flex; align-items: center; gap: 7px; margin-top: 8px; padding-top: 6px;
+  border-top: 1px dashed var(--border); font-size: 11px; color: var(--muted);
+}
+.dot-typing.sm i { width: 4px; height: 4px; }
+.bubble-meta { margin-top: 6px; font-size: 11px; color: var(--muted); }
+
+/* --- 大纲树就地改名 --- */
+.rename-input {
+  flex: 1; min-width: 0; height: 22px; padding: 0 6px; font-size: 13px;
+  border: 1px solid var(--accent); border-radius: 5px; background: #fff; color: var(--text);
+  outline: none; box-shadow: 0 0 0 3px rgba(79, 70, 229, .1);
+}
+.tree-title:hover { color: var(--accent); }
+
 .agent-quick {
   flex: 0 0 auto; display: flex; gap: 6px; overflow-x: auto; padding: 8px 12px;
   border-top: 1px solid var(--border); scrollbar-width: none;

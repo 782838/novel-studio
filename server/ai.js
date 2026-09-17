@@ -104,6 +104,98 @@ async function testConnection() {
   };
 }
 
+/**
+ * 流式调用：边收边回调，最后返回与 callChat 相同形状的结果，便于主循环复用。
+ * onDelta 会收到 { type: 'thinking' | 'content' | 'tool', text } ——thinking 即模型的思考过程。
+ * 兼容三种情况：标准 SSE、个别接口不支持 stream 时直接返回 JSON、以及中途被 abort。
+ */
+async function callChatStream({ messages, tools, temperature, maxTokens, onDelta, signal }) {
+  const s = settings();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
+  const relay = () => ctrl.abort();
+  const emit = (ev) => { if (onDelta) { try { onDelta(ev); } catch (_) { /* 回调异常不影响主流程 */ } } };
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener('abort', relay, { once: true });
+  }
+  try {
+    const body = {
+      model: s.model,
+      messages,
+      temperature: temperature ?? s.temperature ?? 0.85,
+      max_tokens: maxTokens ?? s.maxTokens ?? 4096,
+      stream: true
+    };
+    if (tools && tools.length) {
+      body.tools = tools;
+      body.tool_choice = 'auto';
+    }
+    Object.assign(body, parseExtraBody(s.extraBody));
+
+    const res = await fetch(endpointUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.apiKey}` },
+      body: JSON.stringify(body),
+      signal: ctrl.signal
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`模型服务返回 ${res.status}: ${text.slice(0, 300)}`);
+    }
+
+    const ctype = String(res.headers.get('content-type') || '');
+    // 有的兼容接口忽略 stream，直接吐完整 JSON
+    if (!res.body || ctype.includes('application/json')) {
+      const json = JSON.parse(await res.text());
+      const m = json?.choices?.[0]?.message || {};
+      if (m.reasoning_content) emit({ type: 'thinking', text: String(m.reasoning_content) });
+      if (m.content) emit({ type: 'content', text: String(m.content) });
+      return json;
+    }
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    let content = '';
+    let reasoning = '';
+    const toolCalls = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line || line[0] === ':' || !line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        let json;
+        try { json = JSON.parse(payload); } catch (_) { continue; }
+        const delta = json?.choices?.[0]?.delta || {};
+        // GLM / DeepSeek 等推理模型会把思考过程放在 reasoning_content（少数用 reasoning）
+        const think = delta.reasoning_content || delta.reasoning || '';
+        if (think) { reasoning += think; emit({ type: 'thinking', text: String(think) }); }
+        if (delta.content) { content += delta.content; emit({ type: 'content', text: String(delta.content) }); }
+        for (const tc of delta.tool_calls || []) {
+          // 工具调用的参数是分片下发的，按 index 累积；少数接口不给 index，退化为追加到最后一条
+          const idx = tc.index != null ? tc.index : (toolCalls.length ? toolCalls.length - 1 : 0);
+          if (!toolCalls[idx]) toolCalls[idx] = { id: '', type: 'function', function: { name: '', arguments: '' } };
+          const slot = toolCalls[idx];
+          if (tc.id) slot.id = tc.id;
+          if (tc.function?.name) slot.function.name += tc.function.name;
+          if (tc.function?.arguments) slot.function.arguments += tc.function.arguments;
+        }
+      }
+    }
+    return { choices: [{ message: { content, reasoning_content: reasoning, tool_calls: toolCalls.filter(Boolean) } }] };
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', relay);
+  }
+}
+
 // ---------------------------------------------------------------- 上下文
 
 function trunc(s, n) {
@@ -784,27 +876,72 @@ function extractActions(text = '') {
   return blocks;
 }
 
-async function runAgent({ projectId, message, history = [], chapterId = null }) {
+/**
+ * Agent 主循环。
+ * 传入 onEvent 时会走流式（思考过程 / 正文 / 工具执行都能实时推给前端），
+ * 并用 signal 支持中途停止；不传则与旧行为完全一致（一次性返回）。
+ * 事件类型：round / thinking / answer / op / demo
+ */
+async function runAgent({ projectId, message, history = [], chapterId = null, onEvent, signal }) {
+  const emit = (ev) => { if (onEvent) { try { onEvent(ev); } catch (_) { /* ignore */ } } };
   const ops = [];
   const project = store.getProject(projectId);
   if (!project) throw new Error('项目不存在');
 
-  if (!llmEnabled()) return demoReply(projectId, message, ops);
+  if (!llmEnabled()) {
+    const demo = demoReply(projectId, message, ops);
+    emit({ type: 'answer', text: demo.reply });
+    return { ...demo, thinking: '', thinkMs: 0 };
+  }
 
+  const useStream = typeof onEvent === 'function';
   const exec = makeExecutor(projectId, ops);
   let useTools = true;
   let finishSummary = '';
   let finalText = '';
+  let thinking = '';
+  let firstThinkAt = 0;
+  let lastThinkAt = 0;
   const messages = [
     { role: 'system', content: systemPrompt(projectId, true, chapterId) + TEXT_PROTOCOL_HINT },
     ...history.slice(-12).map((h) => ({ role: h.role, content: h.content })),
     { role: 'user', content: message }
   ];
 
+  /** 执行一个工具，并把「已执行」这类操作实时推给前端 */
+  const runTool = (name, args) => {
+    let result;
+    try {
+      result = exec[name] ? exec[name](args) : { ok: false, message: `未知工具 ${name}` };
+    } catch (err) {
+      result = { ok: false, message: `执行失败：${err.message}` };
+    }
+    const last = ops[ops.length - 1];
+    if (last && last.action === name) emit({ type: 'op', action: last.action, label: last.label });
+    else if (!result.ok) emit({ type: 'op', action: name, label: `${name}：${result.message || '未执行'}`, failed: true });
+    return result;
+  };
+
+  const onDelta = (d) => {
+    if (d.type === 'thinking') {
+      const now = Date.now();
+      if (!firstThinkAt) firstThinkAt = now;
+      lastThinkAt = now;
+      thinking += d.text;
+      emit({ type: 'thinking', text: d.text });
+    } else if (d.type === 'content') {
+      // 先按「正在生成」实时显示；这一轮如果其实是工具调用轮，前端会在下一轮开始时清掉
+      emit({ type: 'answer', text: d.text, tentative: true });
+    }
+  };
+
   for (let round = 0; round < MAX_ROUNDS; round++) {
+    emit({ type: 'round', n: round + 1 });
     let json;
     try {
-      json = await callChat({ messages, tools: useTools ? TOOLS : null });
+      json = useStream
+        ? await callChatStream({ messages, tools: useTools ? TOOLS : null, signal, onDelta })
+        : await callChat({ messages, tools: useTools ? TOOLS : null });
     } catch (err) {
       if (useTools && /tool|工具|400|不支持/i.test(err.message)) {
         useTools = false;
@@ -830,13 +967,11 @@ async function runAgent({ projectId, message, history = [], chapterId = null }) 
       for (const tc of toolCalls) {
         const name = tc.function?.name;
         const args = parseArgs(tc.function?.arguments);
-        let result;
-        try {
-          result = exec[name] ? exec[name](args) : { ok: false, message: `未知工具 ${name}` };
-        } catch (err) {
-          result = { ok: false, message: `执行失败：${err.message}` };
+        const result = runTool(name, args);
+        if (result && result.__finish) {
+          finishSummary = result.summary;
+          finished = true;   // 修：之前只记了总结却没结束循环，白白多跑一轮
         }
-        if (result && result.__finish) finishSummary = result.summary;
         messages.push({
           role: 'tool',
           tool_call_id: tc.id,
@@ -854,26 +989,23 @@ async function runAgent({ projectId, message, history = [], chapterId = null }) 
     if (!useTools) {
       const actions = extractActions(content);
       if (actions.length) {
-        const results = actions.map((a) => {
-          try {
-            return exec[a.tool] ? exec[a.tool](a.args || {}) : { ok: false, message: `未知工具 ${a.tool}` };
-          } catch (err) {
-            return { ok: false, message: `执行失败：${err.message}` };
-          }
-        });
+        const results = actions.map((a) => runTool(a.tool, a.args || {}));
         messages.push({ role: 'user', content: `执行结果：\n${results.map((r) => JSON.stringify(r)).join('\n')}\n请继续，或输出总结。` });
         continue;
       }
     }
 
     finalText = content;
+    emit({ type: 'answer', text: content });
     break;
   }
 
   return {
     reply: finishSummary || finalText || '（模型未完成输出，请再试一次）',
     ops,
-    demo: false
+    demo: false,
+    thinking,
+    thinkMs: firstThinkAt && lastThinkAt ? Math.max(0, lastThinkAt - firstThinkAt) : 0
   };
 }
 

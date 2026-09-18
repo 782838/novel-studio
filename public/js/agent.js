@@ -38,6 +38,9 @@ export function createAgent(ctx) {
   // 这样点「全部生成」之后会像跟助手对话一样：自动打开面板 → 显示正在做什么 → 末尾汇报条数。
   let tasks = [];
   let taskTimer = null;
+  // 「思考过程」是否自动跟随最新内容：默认跟随（贴底），用户手动往上翻后停住、
+  // 重新滚回底部又恢复跟随。否则流式期间要么被弹回顶部、要么看不到新写出的思考。
+  let thinkStick = true;
 
   function statusHtml() {
     const configured = ctx.settings.hasKey;
@@ -321,14 +324,20 @@ export function createAgent(ctx) {
     });
     box.innerHTML = msgsHtml();
     box.querySelectorAll('.think-body[data-think]').forEach((el) => {
+      const key = el.dataset.think;
       const det = el.closest('details.think');
-      if (det && savedOpen.has(el.dataset.think)) det.open = true;   // 展开态别被重绘吃掉
-      const top = savedThink[el.dataset.think];
-      if (top) el.scrollTop = top;
+      if (det && savedOpen.has(key)) det.open = true;   // 展开态别被重绘吃掉
+      if (key === 'live') {
+        // 正在生成的思考块：跟随态就贴底看最新，用户上翻过就停在他看的原处
+        el.scrollTop = thinkStick ? el.scrollHeight : (savedThink[key] || 0);
+      } else if (savedThink[key]) {
+        el.scrollTop = savedThink[key];
+      }
     });
     // 贴着底部的照旧跟到底；用户手动上翻过，就停在原处，不要抢回顶部
     box.scrollTop = nearBottom ? box.scrollHeight : prevTop;
     bindCopy(box);
+    bindThinkScroll(box);
     bindTaskStop(box);
     syncSend();
     ensureTicker();
@@ -347,6 +356,15 @@ export function createAgent(ctx) {
   function bindTaskStop(box) {
     box.querySelectorAll('[data-task-stop]').forEach((b) => {
       b.addEventListener('click', () => stopTask(b.dataset.taskStop));
+    });
+  }
+
+  /** 监听「思考过程」的滚动：贴底即视为跟随最新，往上翻则停住、不再自动跟 */
+  function bindThinkScroll(box) {
+    const el = box.querySelector('.think-body[data-think="live"]');
+    if (!el) return;
+    el.addEventListener('scroll', () => {
+      thinkStick = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
     });
   }
 
@@ -502,6 +520,7 @@ export function createAgent(ctx) {
     pendingText = value;
     pendingStart = Date.now();
     live = { thinking: '', answer: '', ops: [], notes: [], round: 1, startedAt: Date.now(), thinkMs: 0, thinkStartAt: 0, lastThinkAt: 0 };
+    thinkStick = true;   // 新一轮回答默认重新跟随最新思考
     paint();
     pendingTimer = setInterval(() => {
       const el = root.querySelector('#liveWaited');

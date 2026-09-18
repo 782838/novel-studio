@@ -2342,6 +2342,9 @@ export function memos(ctx) {
 
       root.querySelectorAll('[data-act="clear-one"]').forEach((b) => b.addEventListener('click', async () => {
         const id = b.closest('.memo-row').dataset.id;
+        const title = b.closest('.memo-row').querySelector('.memo-title').textContent;
+        const sure = await openConfirm({ title: '清空记忆点', message: `将清空「${title}」的记忆点（章节正文不受影响），确定？`, danger: true, okText: '清空' });
+        if (!sure) return;
         await c.patch('chapters', id, { memo: '' }, { silent: true });
         applyToDom(id, '');
         c.syncLocal();

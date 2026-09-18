@@ -63,41 +63,65 @@ function endpointUrl(cfg) {
 async function callChat({ messages, tools, temperature, maxTokens, cfg }) {
   const c = cfg || activeConfig();
   if (!c) throw new Error('尚未配置任何模型，请到「设置 → 模型」添加一个自定义 AI');
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
-  try {
-    const body = {
-      model: c.model,
-      messages,
-      temperature: temperature ?? c.temperature ?? 0.85,
-      max_tokens: maxTokens ?? c.maxTokens ?? 4096,
-      stream: false
-    };
-    if (tools && tools.length) {
-      body.tools = tools;
-      body.tool_choice = 'auto';
+  
+  // 重试配置：429错误最多重试3次，使用指数退避（1s、2s、4s）
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_BASE = 1000; // 1秒基准延迟
+  
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
+    
+    try {
+      const body = {
+        model: c.model,
+        messages,
+        temperature: temperature ?? c.temperature ?? 0.85,
+        max_tokens: maxTokens ?? c.maxTokens ?? 4096,
+        stream: false
+      };
+      if (tools && tools.length) {
+        body.tools = tools;
+        body.tool_choice = 'auto';
+      }
+      // 合并用户自定义的高级参数（例如 GLM 的 reasoning_effort）
+      const extra = parseExtraBody(c.extraBody);
+      Object.assign(body, extra);
+      const res = await fetch(endpointUrl(c), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${c.apiKey}`
+        },
+        body: JSON.stringify(body),
+        signal: ctrl.signal
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        const errorInfo = `模型服务返回 ${res.status}: ${text.slice(0, 300)}`;
+        
+        // 检查是否是429错误（频率限制），如果是则重试
+        if (res.status === 429 && attempt < MAX_RETRIES) {
+          const delay = RETRY_DELAY_BASE * Math.pow(2, attempt); // 指数退避
+          console.warn(`[AI重试] 第${attempt + 1}次请求遇到429频率限制，${delay}ms后重试...`);
+          clearTimeout(timer);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue; // 继续下一次重试
+        }
+        
+        throw new Error(errorInfo);
+      }
+      let json;
+      try { json = JSON.parse(text); } catch (_) {
+        throw new Error(`模型服务返回非 JSON 内容: ${text.slice(0, 200)}`);
+      }
+      return json;
+    } finally {
+      clearTimeout(timer);
     }
-    // 合并用户自定义的高级参数（例如 GLM 的 reasoning_effort）
-    const extra = parseExtraBody(c.extraBody);
-    Object.assign(body, extra);
-    const res = await fetch(endpointUrl(c), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${c.apiKey}`
-      },
-      body: JSON.stringify(body),
-      signal: ctrl.signal
-    });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`模型服务返回 ${res.status}: ${text.slice(0, 300)}`);
-    let json;
-    try { json = JSON.parse(text); } catch (_) {
-      throw new Error(`模型服务返回非 JSON 内容: ${text.slice(0, 200)}`);
-    }
-    return json;
-  } finally {
-    clearTimeout(timer);
+    
+    // 如果成功，直接返回，不需要重试
+    break;
   }
 }
 
@@ -134,92 +158,116 @@ async function testConnection(override) {
  * 流式调用：边收边回调，最后返回与 callChat 相同形状的结果，便于主循环复用。
  * onDelta 会收到 { type: 'thinking' | 'content' | 'tool', text } ——thinking 即模型的思考过程。
  * 兼容三种情况：标准 SSE、个别接口不支持 stream 时直接返回 JSON、以及中途被 abort。
+ * 新增：自动重试429错误（免费模型频率限制），使用指数退避策略。
  */
 async function callChatStream({ messages, tools, temperature, maxTokens, onDelta, signal, cfg }) {
   const c = cfg || activeConfig();
   if (!c) throw new Error('尚未配置任何模型，请到「设置 → 模型」添加一个自定义 AI');
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
-  const relay = () => ctrl.abort();
-  const emit = (ev) => { if (onDelta) { try { onDelta(ev); } catch (_) { /* 回调异常不影响主流程 */ } } };
-  if (signal) {
-    if (signal.aborted) ctrl.abort();
-    else signal.addEventListener('abort', relay, { once: true });
-  }
-  try {
-    const body = {
-      model: c.model,
-      messages,
-      temperature: temperature ?? c.temperature ?? 0.85,
-      max_tokens: maxTokens ?? c.maxTokens ?? 4096,
-      stream: true
-    };
-    if (tools && tools.length) {
-      body.tools = tools;
-      body.tool_choice = 'auto';
+  
+  // 重试配置：429错误最多重试3次，使用指数退避（1s、2s、4s）
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_BASE = 1000; // 1秒基准延迟
+  
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
+    const relay = () => ctrl.abort();
+    const emit = (ev) => { if (onDelta) { try { onDelta(ev); } catch (_) { /* 回调异常不影响主流程 */ } } };
+    if (signal) {
+      if (signal.aborted) ctrl.abort();
+      else signal.addEventListener('abort', relay, { once: true });
     }
-    Object.assign(body, parseExtraBody(c.extraBody));
+    
+    try {
+      const body = {
+        model: c.model,
+        messages,
+        temperature: temperature ?? c.temperature ?? 0.85,
+        max_tokens: maxTokens ?? c.maxTokens ?? 4096,
+        stream: true
+      };
+      if (tools && tools.length) {
+        body.tools = tools;
+        body.tool_choice = 'auto';
+      }
+      Object.assign(body, parseExtraBody(c.extraBody));
 
-    const res = await fetch(endpointUrl(c), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },
-      body: JSON.stringify(body),
-      signal: ctrl.signal
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`模型服务返回 ${res.status}: ${text.slice(0, 300)}`);
-    }
+      const res = await fetch(endpointUrl(c), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },
+        body: JSON.stringify(body),
+        signal: ctrl.signal
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        const errorInfo = `模型服务返回 ${res.status}: ${text.slice(0, 300)}`;
+        
+        // 检查是否是429错误（频率限制），如果是则重试
+        if (res.status === 429 && attempt < MAX_RETRIES) {
+          const delay = RETRY_DELAY_BASE * Math.pow(2, attempt); // 指数退避
+          console.warn(`[AI重试] 第${attempt + 1}次请求遇到429频率限制，${delay}ms后重试...`);
+          clearTimeout(timer);
+          if (signal) signal.removeEventListener('abort', relay);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue; // 继续下一次重试
+        }
+        
+        throw new Error(errorInfo);
+      }
 
-    const ctype = String(res.headers.get('content-type') || '');
-    // 有的兼容接口忽略 stream，直接吐完整 JSON
-    if (!res.body || ctype.includes('application/json')) {
-      const json = JSON.parse(await res.text());
-      const m = json?.choices?.[0]?.message || {};
-      if (m.reasoning_content) emit({ type: 'thinking', text: String(m.reasoning_content) });
-      if (m.content) emit({ type: 'content', text: String(m.content) });
-      return json;
-    }
+      const ctype = String(res.headers.get('content-type') || '');
+      // 有的兼容接口忽略 stream，直接吐完整 JSON
+      if (!res.body || ctype.includes('application/json')) {
+        const json = JSON.parse(await res.text());
+        const m = json?.choices?.[0]?.message || {};
+        if (m.reasoning_content) emit({ type: 'thinking', text: String(m.reasoning_content) });
+        if (m.content) emit({ type: 'content', text: String(m.content) });
+        return json;
+      }
 
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    let content = '';
-    let reasoning = '';
-    const toolCalls = [];
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const raw of lines) {
-        const line = raw.trim();
-        if (!line || line[0] === ':' || !line.startsWith('data:')) continue;
-        const payload = line.slice(5).trim();
-        if (!payload || payload === '[DONE]') continue;
-        let json;
-        try { json = JSON.parse(payload); } catch (_) { continue; }
-        const delta = json?.choices?.[0]?.delta || {};
-        // GLM / DeepSeek 等推理模型会把思考过程放在 reasoning_content（少数用 reasoning）
-        const think = delta.reasoning_content || delta.reasoning || '';
-        if (think) { reasoning += think; emit({ type: 'thinking', text: String(think) }); }
-        if (delta.content) { content += delta.content; emit({ type: 'content', text: String(delta.content) }); }
-        for (const tc of delta.tool_calls || []) {
-          // 工具调用的参数是分片下发的，按 index 累积；少数接口不给 index，退化为追加到最后一条
-          const idx = tc.index != null ? tc.index : (toolCalls.length ? toolCalls.length - 1 : 0);
-          if (!toolCalls[idx]) toolCalls[idx] = { id: '', type: 'function', function: { name: '', arguments: '' } };
-          const slot = toolCalls[idx];
-          if (tc.id) slot.id = tc.id;
-          if (tc.function?.name) slot.function.name += tc.function.name;
-          if (tc.function?.arguments) slot.function.arguments += tc.function.arguments;
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let content = '';
+      let reasoning = '';
+      const toolCalls = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const raw of lines) {
+          const line = raw.trim();
+          if (!line || line[0] === ':' || !line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === '[DONE]') continue;
+          let json;
+          try { json = JSON.parse(payload); } catch (_) { continue; }
+          const delta = json?.choices?.[0]?.delta || {};
+          // GLM / DeepSeek 等推理模型会把思考过程放在 reasoning_content（少数用 reasoning）
+          const think = delta.reasoning_content || delta.reasoning || '';
+          if (think) { reasoning += think; emit({ type: 'thinking', text: String(think) }); }
+          if (delta.content) { content += delta.content; emit({ type: 'content', text: String(delta.content) }); }
+          for (const tc of delta.tool_calls || []) {
+            // 工具调用的参数是分片下发的，按 index 累积；少数接口不给 index，退化为追加到最后一条
+            const idx = tc.index != null ? tc.index : (toolCalls.length ? toolCalls.length - 1 : 0);
+            if (!toolCalls[idx]) toolCalls[idx] = { id: '', type: 'function', function: { name: '', arguments: '' } };
+            const slot = toolCalls[idx];
+            if (tc.id) slot.id = tc.id;
+            if (tc.function?.name) slot.function.name += tc.function.name;
+            if (tc.function?.arguments) slot.function.arguments += tc.function.arguments;
+          }
         }
       }
+      return { choices: [{ message: { content, reasoning_content: reasoning, tool_calls: toolCalls.filter(Boolean) } }] };
+    } finally {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', relay);
     }
-    return { choices: [{ message: { content, reasoning_content: reasoning, tool_calls: toolCalls.filter(Boolean) } }] };
-  } finally {
-    clearTimeout(timer);
-    if (signal) signal.removeEventListener('abort', relay);
+    
+    // 如果成功，直接返回，不需要重试
+    break;
   }
 }
 

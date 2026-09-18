@@ -25,6 +25,23 @@ const ROOT = path.join(__dirname, '..');
 const GIT = process.env.GIT_BIN
   || 'C:/Users/35546/.workbuddy/binaries/PortableGit/versions/1.2.0/cmd/git.exe';
 
+/* 证书：本机装了 HTTPS 中间人（如 SteamTools）时，Node 自带 CA 校验会报
+ * "unable to verify the first certificate"，而 GitHub API 走的就是 fetch。
+ * 这里和 build-win.js 一样，自动找合并了该根证书的 CA 包并指过去（没有就原样跑，不影响别的机器）。 */
+(() => {
+  if (process.env.NODE_EXTRA_CA_CERTS) return;
+  const cands = [
+    process.env.NOVEL_CA_BUNDLE,
+    process.env.USERPROFILE && path.join(process.env.USERPROFILE, '.git-ca-bundle.crt'),
+    process.env.HOME && path.join(process.env.HOME, '.git-ca-bundle.crt')
+  ].filter(Boolean);
+  const ca = cands.find((p) => { try { return fs.existsSync(p); } catch (_) { return false; } });
+  if (ca) {
+    process.env.NODE_EXTRA_CA_CERTS = ca;
+    console.log('· 已指定 CA 包（本机 HTTPS 代理场景）:', ca);
+  }
+})();
+
 const REPO = process.env.REPO_NAME || 'novel-studio';
 const DESC = process.env.REPO_DESC || '本地运行的小说辅助创作工作台：大纲/角色/线路/章节/伏笔一站管理，AI 助手可直接读写项目数据。零依赖，数据全部留在本机。';
 const SKIP_RELEASE = process.env.SKIP_RELEASE === '1';

@@ -11,7 +11,10 @@ const MAX_ROUNDS = 8;
 /** 文本协议模型是一批一批来的（写块 → 等结果 → 再写），轮次上限放宽一些，
  *  否则"把某条副线的所有章节读出来整合"这类长任务会在中途被截断。 */
 const MAX_ROUNDS_TEXT = 16;
-const REQUEST_TIMEOUT = 180000;
+// 单次请求的上限：免费模型（智谱清言等）经常排队 / 慢生成，十几分钟才返回都正常，
+// 所以这里给足 30 分钟，避免「连上了但还没出结果就被掐断、又重排一次队」的死循环。
+// 真正的安全网是 UI 上的「停止」按钮——用户不想等随时能中止；超时就自动重试。
+const REQUEST_TIMEOUT = 1800000;
 
 // ---------------------------------------------------------------- 基础调用
 
@@ -60,18 +63,27 @@ function endpointUrl(cfg) {
   return `${base}/chat/completions`;
 }
 
-async function callChat({ messages, tools, temperature, maxTokens, cfg }) {
+async function callChat({ messages, tools, temperature, maxTokens, signal, maxRetries = Infinity, cfg }) {
   const c = cfg || activeConfig();
   if (!c) throw new Error('尚未配置任何模型，请到「设置 → 模型」添加一个自定义 AI');
-  
-  // 重试配置：429错误最多重试3次，使用指数退避（1s、2s、4s）
-  const MAX_RETRIES = 3;
-  const RETRY_DELAY_BASE = 1000; // 1秒基准延迟
-  
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+
+  // 重试配置：免费模型（智谱清言等）经常繁忙/限流，可能要等十几分钟才恢复，因此「一直重试」
+  // 直到用户手动停止（外部 signal）或遇到非限流错误才放弃；maxRetries 可给连通性测试等设上限。
+  const RETRY_DELAY_BASE = 2000;   // 起始 2s，密集重试
+  const RETRY_DELAY_CAP = 10000;   // 封顶 10s，避免间隔过长
+  const RETRIABLE = new Set([429, 500, 502, 503, 504]); // 限流 / 服务端暂时过载
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const nextDelay = (a) => Math.min(RETRY_DELAY_CAP, Math.round(RETRY_DELAY_BASE * Math.pow(1.6, a)));
+
+  for (let attempt = 0; ; attempt++) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
-    
+    const relay = () => ctrl.abort();
+    if (signal) {
+      if (signal.aborted) ctrl.abort();
+      else signal.addEventListener('abort', relay, { once: true });
+    }
+
     try {
       const body = {
         model: c.model,
@@ -87,28 +99,42 @@ async function callChat({ messages, tools, temperature, maxTokens, cfg }) {
       // 合并用户自定义的高级参数（例如 GLM 的 reasoning_effort）
       const extra = parseExtraBody(c.extraBody);
       Object.assign(body, extra);
-      const res = await fetch(endpointUrl(c), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${c.apiKey}`
-        },
-        body: JSON.stringify(body),
-        signal: ctrl.signal
-      });
+      let res;
+      try {
+        res = await fetch(endpointUrl(c), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${c.apiKey}`
+          },
+          body: JSON.stringify(body),
+          signal: ctrl.signal
+        });
+      } catch (netErr) {
+        // 连接失败 / 超时（内部 timer 中止）：一直重试，直到用户手动停止或超过上限
+        if (signal?.aborted) throw netErr;
+        if (attempt < maxRetries) {
+          const delay = nextDelay(attempt);
+          console.warn(`[AI重试] 第${attempt + 1}次连接失败（${netErr && netErr.message ? netErr.message : netErr}），约 ${(delay/1000)|0}s 后重试…`);
+          clearTimeout(timer);
+          if (signal) signal.removeEventListener('abort', relay);
+          await sleep(delay);
+          continue;
+        }
+        throw netErr;
+      }
       const text = await res.text();
       if (!res.ok) {
         const errorInfo = `模型服务返回 ${res.status}: ${text.slice(0, 300)}`;
-        
-        // 检查是否是429错误（频率限制），如果是则重试
-        if (res.status === 429 && attempt < MAX_RETRIES) {
-          const delay = RETRY_DELAY_BASE * Math.pow(2, attempt); // 指数退避
-          console.warn(`[AI重试] 第${attempt + 1}次请求遇到429频率限制，${delay}ms后重试...`);
+        // 限流 / 服务端暂时过载：一直重试，直到用户手动停止或超过上限
+        if (RETRIABLE.has(res.status) && attempt < maxRetries) {
+          const delay = nextDelay(attempt);
+          console.warn(`[AI重试] 第${attempt + 1}次遇到 ${res.status}（模型繁忙/限流），约 ${(delay/1000)|0}s 后继续重试…（再次点「停止」可取消）`);
           clearTimeout(timer);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue; // 继续下一次重试
+          if (signal) signal.removeEventListener('abort', relay);
+          await sleep(delay);
+          continue;
         }
-        
         throw new Error(errorInfo);
       }
       let json;
@@ -118,10 +144,8 @@ async function callChat({ messages, tools, temperature, maxTokens, cfg }) {
       return json;
     } finally {
       clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', relay);
     }
-    
-    // 如果成功，直接返回，不需要重试
-    break;
   }
 }
 
@@ -140,6 +164,7 @@ async function testConnection(override) {
         { role: 'user', content: '回复两个字：正常' }
       ],
       maxTokens: 16,
+      maxRetries: 1,
       cfg: c
     });
     return {
@@ -158,17 +183,21 @@ async function testConnection(override) {
  * 流式调用：边收边回调，最后返回与 callChat 相同形状的结果，便于主循环复用。
  * onDelta 会收到 { type: 'thinking' | 'content' | 'tool', text } ——thinking 即模型的思考过程。
  * 兼容三种情况：标准 SSE、个别接口不支持 stream 时直接返回 JSON、以及中途被 abort。
- * 新增：自动重试429错误（免费模型频率限制），使用指数退避策略。
+ * 免费模型繁忙/限流时「一直重试」（带指数退避、封顶 30s），直到用户手动点「停止」（signal）或遇到非限流错误才放弃。
  */
 async function callChatStream({ messages, tools, temperature, maxTokens, onDelta, signal, cfg }) {
   const c = cfg || activeConfig();
   if (!c) throw new Error('尚未配置任何模型，请到「设置 → 模型」添加一个自定义 AI');
   
-  // 重试配置：429错误最多重试3次，使用指数退避（1s、2s、4s）
-  const MAX_RETRIES = 3;
-  const RETRY_DELAY_BASE = 1000; // 1秒基准延迟
-  
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  // 重试配置：免费模型经常繁忙/限流，可能要等十几分钟才恢复，因此「一直重试」
+  // 直到用户手动停止（外部 signal）或遇到非限流错误才放弃。
+  const RETRY_DELAY_BASE = 2000;   // 起始 2s，密集重试
+  const RETRY_DELAY_CAP = 10000;   // 封顶 10s，避免间隔过长
+  const RETRIABLE = new Set([429, 500, 502, 503, 504]); // 限流 / 服务端暂时过载
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const nextDelay = (a) => Math.min(RETRY_DELAY_CAP, Math.round(RETRY_DELAY_BASE * Math.pow(1.6, a)));
+
+  for (let attempt = 0; ; attempt++) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
     const relay = () => ctrl.abort();
@@ -192,26 +221,36 @@ async function callChatStream({ messages, tools, temperature, maxTokens, onDelta
       }
       Object.assign(body, parseExtraBody(c.extraBody));
 
-      const res = await fetch(endpointUrl(c), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },
-        body: JSON.stringify(body),
-        signal: ctrl.signal
-      });
+      let res;
+      try {
+        res = await fetch(endpointUrl(c), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },
+          body: JSON.stringify(body),
+          signal: ctrl.signal
+        });
+      } catch (netErr) {
+        // 连接失败 / 超时（内部 timer 中止）：一直重试，直到用户手动停止
+        if (signal?.aborted) throw netErr;
+        const delay = nextDelay(attempt);
+        console.warn(`[AI重试] 第${attempt + 1}次连接失败（${netErr && netErr.message ? netErr.message : netErr}），约 ${(delay/1000)|0}s 后重试…`);
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', relay);
+        await sleep(delay);
+        continue;
+      }
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         const errorInfo = `模型服务返回 ${res.status}: ${text.slice(0, 300)}`;
-        
-        // 检查是否是429错误（频率限制），如果是则重试
-        if (res.status === 429 && attempt < MAX_RETRIES) {
-          const delay = RETRY_DELAY_BASE * Math.pow(2, attempt); // 指数退避
-          console.warn(`[AI重试] 第${attempt + 1}次请求遇到429频率限制，${delay}ms后重试...`);
+        // 限流 / 服务端暂时过载：一直重试，直到用户手动停止
+        if (RETRIABLE.has(res.status)) {
+          const delay = nextDelay(attempt);
+          console.warn(`[AI重试] 第${attempt + 1}次遇到 ${res.status}（模型繁忙/限流），约 ${(delay/1000)|0}s 后继续重试…（再次点「停止」可取消）`);
           clearTimeout(timer);
           if (signal) signal.removeEventListener('abort', relay);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue; // 继续下一次重试
+          await sleep(delay);
+          continue;
         }
-        
         throw new Error(errorInfo);
       }
 
@@ -1066,7 +1105,7 @@ async function runAgent({ projectId, message, history = [], chapterId = null, on
     try {
       json = useStream
         ? await callChatStream({ messages, tools: useTools ? TOOLS : null, signal, onDelta })
-        : await callChat({ messages, tools: useTools ? TOOLS : null });
+        : await callChat({ messages, tools: useTools ? TOOLS : null, signal });
     } catch (err) {
       if (useTools && /tool|工具|400|不支持/i.test(err.message)) {
         useTools = false;

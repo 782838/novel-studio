@@ -168,9 +168,21 @@ const readStore = () => JSON.parse(fs.readFileSync(path.join(DATA, 'store.json')
     delete db.settings.model; delete db.settings.temperature; delete db.settings.maxTokens;
     if (!db.projects.length) {
       db.projects.push({ id: 'p_test', title: '流式测试作品', createdAt: Date.now() });
-      db.notes = [{ id: 'n_test', projectId: 'p_test', title: '原备忘', content: '内容', category: '备忘', pinned: false, order: 1 }];
-      db.foreshadow = [{ id: 'f_test', projectId: 'p_test', title: '原伏笔', status: 'planted', order: 1 }];
-      db.outline = [{ id: 'o_test', projectId: 'p_test', title: '原节点', type: 'act', order: 1 }];
+    }
+    // 不论拷来的是空数据还是用户真实数据，都保证所选项目下notes/伏笔/大纲各有一条测试记录，
+    // 否则第 4 节按 projectId 找 fixture 时会因真实数据缺项而崩（不能依赖用户数据内容）。
+    const pid = db.projects[0].id;
+    db.notes = db.notes || [];
+    db.foreshadow = db.foreshadow || [];
+    db.outline = db.outline || [];
+    if (!db.notes.some((x) => x.projectId === pid)) {
+      db.notes.push({ id: 'n_test', projectId: pid, title: '原备忘', content: '内容', category: '备忘', pinned: false, order: 1 });
+    }
+    if (!db.foreshadow.some((x) => x.projectId === pid)) {
+      db.foreshadow.push({ id: 'f_test', projectId: pid, title: '原伏笔', status: 'planted', order: 1 });
+    }
+    if (!db.outline.some((x) => x.projectId === pid)) {
+      db.outline.push({ id: 'o_test', projectId: pid, title: '原节点', type: 'act', order: 1 });
     }
     fs.writeFileSync(file, JSON.stringify(db, null, 2));
   };

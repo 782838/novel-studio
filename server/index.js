@@ -30,6 +30,14 @@ const PUBLIC_DIR = process.env.NOVEL_PUBLIC_DIR
   ? path.resolve(process.env.NOVEL_PUBLIC_DIR)
   : path.join(__dirname, '..', 'public');
 
+// 当前版本号：以 package.json 为准（打包后读 asar 内的也能读到）
+const VERSION = (() => {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    return String(pkg.version || '0.0.0');
+  } catch (_) { return '0.0.0'; }
+})();
+
 // 必须在 require('./store') 之前设置，store 会在加载时据此确定数据目录
 const dataArg = ARGS.find((a) => a.startsWith('--data='));
 if (dataArg) {
@@ -160,7 +168,8 @@ on('GET', '/api/meta', async ({ res }) => {
     typeLabel: TYPE_LABEL,
     statusLabel: STATUS_LABEL,
     lineLabel: LINE_LABEL,
-    configured: ai.llmEnabled()
+    configured: ai.llmEnabled(),
+    version: VERSION
   });
 });
 
@@ -895,6 +904,18 @@ on('POST', '/api/ai/continue', async ({ res, body }) => {
   if (!chapterId) return fail(res, '缺少 chapterId');
   const result = await ai.continueChapter({ projectId, chapterId, instruction: instruction || '', words: words || 600 });
   ok(res, result);
+});
+
+// 生成「AI 记忆点」：把章节正文压缩成精简剧情摘要。
+// chapterIds 可为单章 id、id 数组或省略（省略=全书）；onlyMissing 默认 true 只补未生成的。
+on('POST', '/api/ai/memos', async ({ res, body }) => {
+  const { projectId, chapterIds, onlyMissing } = body;
+  if (!projectId) return fail(res, '缺少 projectId');
+  try {
+    const ids = Array.isArray(chapterIds) ? chapterIds : (chapterIds ? [chapterIds] : null);
+    const result = await ai.generateMemos({ projectId, chapterIds: ids, onlyMissing: onlyMissing !== false });
+    ok(res, result);
+  } catch (err) { fail(res, err); }
 });
 
 on('GET', '/api/ai/context/:id', async ({ res, params }) => {

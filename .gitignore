@@ -14,6 +14,7 @@ data-demo/
 *.log
 .smoke/
 .test*/
+.e2e-*/
 
 # ---- 系统杂项 ----
 Thumbs.db

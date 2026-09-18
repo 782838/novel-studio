@@ -1,7 +1,7 @@
 {
   "name": "novel-studio",
   "productName": "小说创作工作台",
-  "version": "1.3.1",
+  "version": "1.4.1",
   "private": true,
   "description": "小说辅助创作工作台：大纲记忆与补全、角色集、主次线路梳理、可操作的 AI 智能体",
   "author": "Novel Studio",
@@ -10,7 +10,8 @@
     "start": "node server/index.js",
     "dev": "node server/index.js",
     "electron": "electron .",
-    "dist": "electron-builder --win nsis",
+    "dist": "node build/build-win.js",
+    "verify:pack": "node build/verify-pack.js",
     "icon": "node build/make-icon.js",
     "smoke": "node build/smoke_embedded.js",
     "smoke:packaged": "node build/smoke_packaged.js",
@@ -18,7 +19,13 @@
     "test:stream": "node build/test-stream.js",
     "test:ui": "electron build/e2e-ui.js",
     "test:settings": "electron build/e2e-settings.js",
-    "test:md": "node build/test-markdown.js"
+    "test:md": "node build/test-markdown.js",
+    "test:memos": "node build/test-memos.js",
+    "test:e2e-memos": "electron build/e2e-memos.js",
+    "test:e2e-chars": "electron build/e2e-chars.js",
+    "test:e2e-update": "electron build/e2e-update.js",
+    "check:update": "electron build/check-update-live.js",
+    "test:e2e-fixes": "electron build/e2e-ui-fixes.js"
   },
   "engines": {
     "node": ">=18"
@@ -58,8 +65,9 @@
       "perMachine": false,
       "allowElevation": true,
       "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
+      "createDesktopShortcut": false,
       "createStartMenuShortcut": true,
+      "include": "build/installer.nsh",
       "shortcutName": "小说创作工作台",
       "artifactName": "小说创作工作台-安装包-${version}-setup.${ext}",
       "deleteAppDataOnUninstall": false

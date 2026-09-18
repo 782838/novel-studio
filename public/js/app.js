@@ -2,6 +2,7 @@
 import api from './api.js';
 import * as V from './views.js';
 import { createAgent, openSettings } from './agent.js';
+import { initUpdate } from './update.js';
 import { esc, openForm, openModal, openConfirm, closeModal, toast } from './ui.js';
 
 const NAV = [
@@ -10,6 +11,7 @@ const NAV = [
   { key: 'characters', icon: '👤', label: '角色集' },
   { key: 'lines', icon: '🧵', label: '线路' },
   { key: 'chapters', icon: '📄', label: '章节' },
+  { key: 'memos', icon: '🧠', label: 'AI记忆点' },
   { key: 'world', icon: '🌐', label: '设定' },
   { key: 'foreshadow', icon: '❓', label: '伏笔' },
   { key: 'notes', icon: '📌', label: '备忘' },
@@ -25,6 +27,7 @@ const VIEWS = {
   characters: V.characters,
   lines: V.lines,
   chapters: V.chapters,
+  memos: V.memos,
   world: V.world,
   foreshadow: V.foreshadow,
   notes: V.notes,
@@ -38,7 +41,7 @@ const state = {
   projectId: null,
   data: emptyBundle(),
   view: 'dashboard',
-  sel: { nodeId: null, chapterId: null, charGraph: false, query: '' },
+  sel: { nodeId: null, chapterId: null, charGraph: false, focusChar: null, query: '' },
   collapsed: new Set()
 };
 
@@ -55,7 +58,10 @@ const sidebarEl = () => document.getElementById('sidebar');
 
 /* ---------------------------------------------------------------- 上下文 */
 
-const flushers = [];
+// 当前视图注册的「重绘前落盘」钩子。
+// 视图每次重绘都会重建，所以 render() 会清空重登记——否则来回切几次视图后，
+// 旧视图的钩子会拿着新视图的 DOM（同一个 .view 元素）去写旧章节，属于数据事故。
+let flushers = [];
 
 const ctx = {
   get meta() { return state.meta; },
@@ -72,7 +78,12 @@ const ctx = {
   registerFlush(fn) { flushers.push(fn); },
 
   async reload() {
-    flushers.forEach((f) => { try { f(); } catch (_) { /* ignore */ } });
+    const pending = flushers.slice();
+    flushers = [];                                   // 先把钩子摘掉，避免重绘后又跑一遍
+    // 钩子可能返回 promise（把待保存的输入写回）：等它落地再拉新数据，避免读到旧值
+    await Promise.all(pending.map((f) => {
+      try { return Promise.resolve(f()); } catch (_) { return null; }
+    }));
     const fresh = await api.getProject(state.projectId);
     state.data = { ...emptyBundle(), ...fresh };
     render();
@@ -143,8 +154,60 @@ function askAI(text) {
 
 /* ---------------------------------------------------------------- 渲染 */
 
+/* ------------------------------------------------- 重绘时保留滚动位置
+ *
+ * 视图是整块 innerHTML 重建的，浏览器会把里面所有滚动容器重置到顶部：
+ * 「新建章节 / 改章节状态 / 点列表项 / AI 插入正文」这类操作之后，
+ * 左侧章节列表都会莫名跳回第一章，长列表尤其难受。
+ * 这里在重绘前后按「子节点索引路径」记录并恢复滚动位置——
+ * 同一个视图重绘时 DOM 结构一致，路径稳定；结构变了则跳过（不硬套旧位置）。
+ */
+function scrollPathOf(el, root) {
+  const path = [];
+  let node = el;
+  while (node && node !== root) {
+    const parent = node.parentElement;
+    if (!parent) return null;
+    path.unshift(Array.prototype.indexOf.call(parent.children, node));
+    node = parent;
+  }
+  return node === root ? path : null;
+}
+
+function captureScroll(root) {
+  const saved = [];
+  for (const el of [root, ...root.querySelectorAll('*')]) {
+    if (!el.scrollTop && !el.scrollLeft) continue;
+    if (el.scrollHeight <= el.clientHeight + 1 && el.scrollWidth <= el.clientWidth + 1) continue;
+    const path = scrollPathOf(el, root);
+    if (path) saved.push({ path, top: el.scrollTop, left: el.scrollLeft });
+  }
+  return saved;
+}
+
+function restoreScroll(root, saved) {
+  for (const { path, top, left } of saved) {
+    let node = root;
+    for (const i of path) {
+      node = node && node.children[i];
+      if (!node) break;
+    }
+    if (!node || !node.style) continue;
+    // 结构变了导致路径落到别的元素上时，别乱设滚动
+    if (node.scrollHeight <= node.clientHeight + 1 && node.scrollWidth <= node.clientWidth + 1) continue;
+    node.scrollTop = top;
+    node.scrollLeft = left;
+  }
+}
+
 function render() {
   renderSidebar();
+
+  // 重绘前先把「还没自动保存的输入」写回：切换视图、点章节、改状态、新建……都走这里。
+  // 此刻旧视图的 DOM 还在（innerHTML 尚未替换），所以钩子读到的是正确的编辑框内容。
+  const pending = flushers;
+  flushers = [];
+  pending.forEach((f) => { try { f(); } catch (_) { /* ignore */ } });
 
   if (!state.projectId) {
     viewEl().innerHTML = welcomeHtml();
@@ -152,10 +215,13 @@ function render() {
     return;
   }
 
+  const el = viewEl();
+  const saved = captureScroll(el);
   const factory = VIEWS[state.view] || V.dashboard;
   const view = factory(ctx);
-  viewEl().innerHTML = view.html;
-  if (view.mount) view.mount(viewEl(), ctx);
+  el.innerHTML = view.html;
+  restoreScroll(el, saved);
+  if (view.mount) view.mount(el, ctx);
 }
 
 function renderSidebar() {
@@ -163,6 +229,7 @@ function renderSidebar() {
   const counts = {
     outline: d.outline.length, characters: d.characters.length, lines: d.lines.length,
     chapters: d.chapters.length, world: d.world.length,
+    memos: d.chapters.filter((c) => String(c.memo || '').trim()).length,
     foreshadow: d.foreshadow.filter((f) => f.status !== 'paid-off').length,
     notes: d.notes.length,
     materials: d.materials.length
@@ -291,7 +358,7 @@ async function deleteCurrentProject() {
 }
 
 async function selectProject(id, reloadProjects = false) {  state.projectId = id;
-  state.sel = { nodeId: null, chapterId: null, charGraph: false, query: '' };
+  state.sel = { nodeId: null, chapterId: null, charGraph: false, focusChar: null, query: '' };
   state.collapsed = new Set();
   localStorage.setItem(LS_PROJECT, id || '');
   if (reloadProjects) await loadProjects();
@@ -733,12 +800,22 @@ async function boot() {
   statusChip.textContent = state.settings.hasKey ? `模型 ${statusLabel || ''}` : '演示模式';
   statusChip.className = `status-chip ${state.settings.hasKey ? 'on' : 'off'}`;
 
+  // 版本检测：进入软件自动查一次；顶栏「检测更新」按钮可手动再查
+  const updateApi = initUpdate({ current: (state.meta && state.meta.version) || '' });
+  window.__novelStudio = window.__novelStudio || {};
+  window.__novelStudio.update = updateApi;
+
   if (localStorage.getItem(LS_AGENT) !== '0') toggleAgent(true);
 
   if (target) await selectProject(target.id);
   else render();
 
   window.addEventListener('keydown', (e) => {
+    // Esc 退出全屏写作（沉浸写作模式下）
+    if (e.key === 'Escape' && document.body.classList.contains('writing-full')) {
+      V.setWritingFull(false);
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === '\\') { e.preventDefault(); toggleAgent(); }
   });
 }

@@ -209,7 +209,7 @@ export function createAgent(ctx) {
         ${QUICK.map((q) => `<button class="quick-chip" data-q="${esc(q)}">${esc(q)}</button>`).join('')}
       </div>
       <div class="agent-input">
-        <textarea id="agentInput" rows="2" placeholder="让我帮你什么？Ctrl + Enter 发送"></textarea>
+        <textarea id="agentInput" rows="2" placeholder="让我帮你什么？Enter 发送，Shift + Enter 换行"></textarea>
         <button class="btn primary sm" id="agentSend">发送</button>
       </div>`;
 
@@ -222,7 +222,8 @@ export function createAgent(ctx) {
       el.value = '';
     });
     root.querySelector('#agentInput').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      // 纯 Enter 发送；Shift+Enter 换行；isComposing 时（中文输入法选词）不拦截，避免误发
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
         if (busy) return toast('助手正在回答，可先点「停止」再发下一条', 'info');
         send(e.target.value);
@@ -247,7 +248,7 @@ export function createAgent(ctx) {
     if (!btn) return;
     btn.textContent = busy ? '■ 停止' : '发送';
     btn.className = `btn sm ${busy ? 'danger' : 'primary'}`;
-    btn.title = busy ? '停止这次回答' : '发送（Ctrl + Enter）';
+    btn.title = busy ? '停止这次回答' : '发送（Enter）';
     btn.disabled = false;   // 一度点过「停止」的话，这里要把它解回来，否则之后再发不出去
   }
 

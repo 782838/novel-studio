@@ -1,6 +1,6 @@
 'use strict';
 import api from './api.js';
-import { esc, md, openForm, openModal, openConfirm, toast, debounce } from './ui.js';
+import { esc, md, openForm, openModal, openConfirm, closeModal, toast, debounce, downloadText, stripBom } from './ui.js';
 import { parseImport } from './importer.js';
 
 const TYPE_ORDER = { act: 0, chapter: 1, scene: 2, beat: 3 };
@@ -12,6 +12,11 @@ function fmtNum(n) {
 
 function byOrder(a, b) {
   return (a.order || 0) - (b.order || 0);
+}
+
+// 统一排序：最近修改的排最前（服务端 update 会写 updatedAt；老数据回退 createdAt）
+function byRecent(a, b) {
+  return ((b.updatedAt || b.createdAt) || 0) - ((a.updatedAt || a.createdAt) || 0);
 }
 
 function childrenOf(list, parentId) {
@@ -500,23 +505,38 @@ export function mountNodeEditor(root, c) {
 export function characters(ctx) {
   const d = ctx.data;
   const graph = ctx.sel.charGraph;
+  const focus = ctx.sel.focusChar;
   const list = d.characters.slice().sort((a, b) => {
-    const rank = (x) => (/主角/.test(x.role || '') ? 0 : /反派/.test(x.role || '') ? 1 : 2);
-    return rank(a) - rank(b) || byOrder(a, b);
+    const pin = (x) => (x.pinned ? 0 : 1);
+    if (pin(a) !== pin(b)) return pin(a) - pin(b);
+    return byRecent(a, b);
   });
+
+  const focusChar = focus ? d.characters.find((c) => c.id === focus) : null;
 
   return {
     html: `
       <div class="page">
         ${toolbar(
       `<button class="btn primary sm" data-act="new">＋ 新建角色</button>
-             <button class="btn ghost sm" data-act="ai">✨ AI 生成角色</button>`,
+             <button class="btn ghost sm" data-act="ai">✨ AI 生成角色</button>
+             <button class="btn ghost sm" data-act="export-cards">📄 导出人物卡</button>`,
       `<label class="switch-inline"><input type="checkbox" id="toggleGraph" ${graph ? 'checked' : ''}/> 关系图</label>
              <input class="search" id="charSearch" placeholder="搜索角色…" value="${esc(ctx.sel.query || '')}" />`
     )}
 
         ${graph
-        ? `<section class="panel graph-panel">${relationGraph(d)}</section>`
+        ? `<section class="panel graph-panel">
+             <div class="graph-bar">
+               ${focusChar
+                 ? `<span>🕸 聚焦：<b>${esc(focusChar.name)}</b> 的关系网</span><button class="btn ghost xs" id="clearFocus">✕ 查看全部</button>`
+                 : `<span class="muted">点击任意节点，查看该角色的关系网与联系人</span>`}
+             </div>
+             <div class="graph-body">
+               <div class="graph-svg-wrap">${relationGraph(d, focus)}</div>
+               ${focusChar ? egoSide(d, focusChar) : ''}
+             </div>
+           </section>`
         : (list.length ? `<div class="char-grid">${list.map((c) => charCard(c, d)).join('')}</div>`
           : emptyBox('还没有角色。先建一个主角，或者让助手替你把人物补齐。', '<button class="btn primary sm" data-act="new">＋ 新建角色</button>'))}
       </div>`,
@@ -534,6 +554,9 @@ export function characters(ctx) {
       });
 
       root.querySelectorAll('[data-act="new"]').forEach((b) => b.addEventListener('click', newBtn));
+
+      const exportBtn = root.querySelector('[data-act="export-cards"]');
+      if (exportBtn) exportBtn.addEventListener('click', () => openCharExport(c));
 
       root.querySelector('[data-act="ai"]').addEventListener('click', () => {
         openForm({
@@ -573,8 +596,35 @@ export function characters(ctx) {
       });
 
       root.querySelectorAll('.char-card').forEach((el) => {
-        el.addEventListener('click', () => openCharacter(c, el.dataset.id));
+        el.addEventListener('click', (e) => {
+          if (e.target.closest('[data-pin]')) return; // 置顶按钮自己处理
+          openCharacter(c, el.dataset.id);
+        });
       });
+
+      root.querySelectorAll('[data-pin]').forEach((b) => b.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = b.dataset.pin;
+        const ch = d.characters.find((x) => x.id === id);
+        if (!ch) return;
+        await c.patch('characters', id, { pinned: !ch.pinned }); // patch 默认会 reload + 重绘
+      }));
+
+      // 关系图：点击节点聚焦其关系网（再点同一节点取消聚焦）
+      root.querySelectorAll('.rel-node').forEach((g) => {
+        g.addEventListener('click', () => {
+          const id = g.dataset.id;
+          c.sel.focusChar = (c.sel.focusChar === id) ? null : id;
+          c.render();
+        });
+      });
+
+      const clearBtn = root.querySelector('#clearFocus');
+      if (clearBtn) clearBtn.addEventListener('click', () => { c.sel.focusChar = null; c.render(); });
+
+      // 聚焦侧栏里的「查看档案」
+      const profileBtn = root.querySelector('[data-act="profile"]');
+      if (profileBtn) profileBtn.addEventListener('click', () => openCharacter(c, focus));
     }
   };
 }
@@ -597,7 +647,8 @@ function characterFields() {
 function charCard(c, d) {
   const rels = d.relations.filter((r) => r.fromId === c.id || r.toId === c.id).length;
   return `
-    <article class="char-card" data-id="${c.id}">
+    <article class="char-card${c.pinned ? ' pinned' : ''}" data-id="${c.id}">
+      <button class="pin-btn${c.pinned ? ' on' : ''}" data-pin="${c.id}" title="${c.pinned ? '取消置顶' : '置顶'}" aria-label="置顶">📌</button>
       <header>
         <span class="avatar" style="background:${esc(c.color || '#6b8afd')}">${esc((c.name || '?').slice(0, 1))}</span>
         <div class="char-head-text">
@@ -609,11 +660,12 @@ function charCard(c, d) {
       <footer>
         ${c.arc ? `<span title="弧光">↗ ${esc(c.arc.slice(0, 18))}</span>` : ''}
         <span title="关系数">🔗 ${rels}</span>
+        ${c.pinned ? '<span class="pin-tag">📌 置顶</span>' : ''}
       </footer>
     </article>`;
 }
 
-function relationGraph(d) {
+function relationGraph(d, focusId) {
   const chars = d.characters;
   if (!chars.length) return emptyBox('还没有角色');
   const W = 960; const H = 460;
@@ -627,31 +679,174 @@ function relationGraph(d) {
     pos.set(ch.id, { x: cx + Math.cos(a) * R, y: cy + Math.sin(a) * R * 0.82 });
   });
 
-  const nameOf = new Map(chars.map((c) => [c.id, c.name]));
+  // 聚焦时计算关系网节点集合（自己 + 直接相连的人）
+  const neighbors = new Set();
+  if (focusId) {
+    neighbors.add(focusId);
+    d.relations.forEach((r) => {
+      if (r.fromId === focusId) neighbors.add(r.toId);
+      if (r.toId === focusId) neighbors.add(r.fromId);
+    });
+  }
+
   const lines = d.relations.map((r) => {
     const a = pos.get(r.fromId); const b = pos.get(r.toId);
     if (!a || !b) return '';
+    const touches = !focusId || r.fromId === focusId || r.toId === focusId;
+    const volatile = r.state === 'volatile';
     const mx = (a.x + b.x) / 2; const my = (a.y + b.y) / 2;
     const nx = -(b.y - a.y); const ny = (b.x - a.x);
     const len = Math.hypot(nx, ny) || 1;
     const off = 22;
     const lx = mx + (nx / len) * off; const ly = my + (ny / len) * off;
-    return `<g class="rel">
-      <line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="#cfc8ba" stroke-width="1.4" />
+    const stroke = volatile ? '#e0a52e' : (focusId && touches ? '#8a7d5a' : '#cfc8ba');
+    const dash = volatile ? ' stroke-dasharray="6 4"' : '';
+    const op = focusId && !touches ? ' opacity="0.1"' : '';
+    const w = focusId && touches ? 1.8 : 1.4;
+    return `<g class="rel${volatile ? ' rel-volatile' : ''}${focusId && touches ? ' rel-focus' : ''}"${op}>
+      <line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${stroke}" stroke-width="${w}"${dash} />
       <text x="${lx}" y="${ly}" class="rel-label">${esc(r.label)}</text>
     </g>`;
   }).join('');
 
   const nodes = chars.map((ch) => {
     const p = pos.get(ch.id);
-    return `<g class="rel-node" data-id="${ch.id}">
-      <circle cx="${p.x}" cy="${p.y}" r="26" fill="${esc(ch.color || '#6b8afd')}" />
+    const isFocus = ch.id === focusId;
+    const inNet = !focusId || neighbors.has(ch.id);
+    const dim = focusId && !inNet;
+    return `<g class="rel-node${isFocus ? ' rel-focus-node' : ''}${dim ? ' rel-dim-node' : ''}" data-id="${ch.id}">
+      <circle cx="${p.x}" cy="${p.y}" r="${isFocus ? 32 : 26}" fill="${esc(ch.color || '#6b8afd')}"${isFocus ? ' stroke="#e0a52e" stroke-width="3"' : ''} />
       <text x="${p.x}" y="${p.y + 6}" class="rel-init">${esc((ch.name || '?').slice(0, 1))}</text>
-      <text x="${p.x}" y="${p.y + 45}" class="rel-name">${esc(ch.name)}</text>
+      <text x="${p.x}" y="${p.y + (isFocus ? 50 : 45)}" class="rel-name">${esc(ch.name)}</text>
     </g>`;
   }).join('');
 
   return `<svg class="rel-svg" viewBox="0 0 ${W} ${H}">${lines}${nodes}</svg>`;
+}
+
+/** 聚焦角色时，右侧列出他的关系网：联系人、关系、稳定 / 可能变化 */
+function egoSide(d, focusChar) {
+  const rels = d.relations.filter((r) => r.fromId === focusChar.id || r.toId === focusChar.id);
+  const nameOf = new Map(d.characters.map((x) => [x.id, x.name]));
+  const roleOf = new Map(d.characters.map((x) => [x.id, x.role || '未定位']));
+  return `
+    <aside class="ego-side">
+      <div class="ego-head">
+        <span class="avatar" style="background:${esc(focusChar.color || '#6b8afd')}">${esc((focusChar.name || '?').slice(0, 1))}</span>
+        <div class="ego-title"><b>${esc(focusChar.name)}</b><span class="role-badge">${esc(focusChar.role || '未定位')}</span></div>
+        <button class="btn ghost xs" data-act="profile">查看档案</button>
+      </div>
+      <h5>关系网（${rels.length}）</h5>
+      ${rels.length ? `<ul class="rel-list ego-rel">${rels.map((r) => {
+        const other = r.fromId === focusChar.id ? r.toId : r.fromId;
+        const dir = r.fromId === focusChar.id ? '→' : (r.toId === focusChar.id ? '←' : '↔');
+        const volatile = r.state === 'volatile';
+        return `<li>
+          <b>${esc(nameOf.get(other) || '?')}</b>
+          <span class="role-badge">${esc(roleOf.get(other) || '')}</span>
+          <span class="rel-dir">${dir}</span> ${esc(r.label)}
+          ${volatile ? '<span class="badge badge-volatile" title="该关系可能生变">可能变化</span>' : '<span class="badge badge-stable">稳定</span>'}
+          ${volatile && r.trend ? `<em class="rel-trend">走向：${esc(r.trend)}</em>` : ''}
+          ${r.description ? `<em>${esc(r.description)}</em>` : ''}
+        </li>`;
+      }).join('')}</ul>` : '<p class="muted small">暂无关系记录</p>'}
+    </aside>`;
+}
+
+/** 单张人物卡 → 纯文本（导出 TXT 用） */
+function charCardText(c, d) {
+  const nameOf = new Map(d.characters.map((x) => [x.id, x.name]));
+  const out = [`【${c.name}】${c.role ? `（${c.role}）` : ''}`];
+  [['别名', c.alias], ['年龄', c.age], ['外貌', c.appearance], ['性格', c.personality],
+    ['核心动机', c.motivation], ['弱点', c.flaw], ['人物弧光', c.arc], ['转折节点', c.beatNote]]
+    .forEach(([k, v]) => out.push(`${k}：${String(v == null ? '' : v).trim() || '待补充'}`));
+
+  const rels = d.relations.filter((r) => r.fromId === c.id || r.toId === c.id);
+  if (rels.length) {
+    out.push('', '· 人物关系');
+    rels.forEach((r) => {
+      const other = r.fromId === c.id ? r.toId : r.fromId;
+      const dir = r.fromId === c.id ? '→' : '←';
+      let s = `  ${nameOf.get(other) || '?'} ${dir} ${r.label || ''}`;
+      if (r.state === 'volatile') s += `［可能变化${r.trend ? `：${r.trend}` : ''}］`;
+      if (r.description) s += ` ${r.description}`;
+      out.push(s);
+    });
+  }
+
+  const safe = String(c.name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const hits = safe ? d.beats.filter((b) => new RegExp(safe, 'i').test(`${b.title}${b.description || ''}`)) : [];
+  if (hits.length) {
+    out.push('', '· 出现在的线路');
+    hits.forEach((b) => {
+      const line = d.lines.find((l) => l.id === b.lineId);
+      out.push(`  ${b.title}${line ? `（${line.name}）` : ''}`);
+    });
+  }
+  return out.join('\n');
+}
+
+/** 多张人物卡合成一份 TXT：不同角色之间空一排 */
+function charCardsText(list, d) {
+  return list.map((c) => charCardText(c, d)).join('\n\n');
+}
+
+/** 勾选角色 → 导出人物卡 TXT（默认全选，可多选） */
+function openCharExport(ctx) {
+  const d = ctx.data;
+  if (!d.characters.length) { toast('还没有角色可以导出', 'error'); return; }
+  const list = d.characters.slice().sort((a, b) => {
+    const pin = (x) => (x.pinned ? 0 : 1);
+    if (pin(a) !== pin(b)) return pin(a) - pin(b);
+    return byRecent(a, b);
+  });
+
+  openModal({
+    title: '导出人物卡', subtitle: '导出为 TXT 文本文件', width: 540,
+    html: `
+      <div class="pick-wrap">
+        <p class="muted small">勾选要导出的角色（可多选）；不同角色之间会自动空一排。</p>
+        <div class="pick-tools">
+          <button class="btn ghost xs" data-pick="all">全选</button>
+          <button class="btn ghost xs" data-pick="none">全不选</button>
+          <span class="muted small" id="pickCount"></span>
+        </div>
+        <ul class="pick-list">
+          ${list.map((c) => `<li>
+            <label><input type="checkbox" value="${c.id}" checked />
+              <b>${esc(c.name)}</b><span class="role-badge">${esc(c.role || '未定位')}</span></label>
+          </li>`).join('')}
+        </ul>
+      </div>`,
+    buttons: [
+      { label: '取消', kind: 'ghost' },
+      { label: '导出 TXT', kind: 'primary', keepOpen: true, onClick: (body, wrap) => {
+        const ids = [...body.querySelectorAll('input[type=checkbox]:checked')].map((el) => el.value);
+        if (!ids.length) { toast('请至少勾选一个角色', 'error'); return; }
+        const picked = list.filter((c) => ids.includes(c.id));
+        const text = charCardsText(picked, d);
+        const title = (d.project && d.project.title) || '作品';
+        try {
+          downloadText(picked.length === 1 ? `${title}-${picked[0].name}-人物卡` : `${title}-人物卡`, text);
+          toast(`已导出 ${picked.length} 张人物卡`, 'success');
+        } catch (_) {
+          navigator.clipboard.writeText(text)
+            .then(() => toast('无法直接保存，已复制到剪贴板', 'info'))
+            .catch(() => toast('导出失败', 'error'));
+        }
+        closeModal(wrap);
+      } }
+    ],
+    onMount: (body) => {
+      const boxes = [...body.querySelectorAll('input[type=checkbox]')];
+      const cnt = body.querySelector('#pickCount');
+      const sync = () => { cnt.textContent = `已选 ${boxes.filter((b) => b.checked).length} / ${boxes.length}`; };
+      sync();
+      boxes.forEach((b) => b.addEventListener('change', sync));
+      body.querySelector('[data-pick="all"]').addEventListener('click', () => { boxes.forEach((b) => { b.checked = true; }); sync(); });
+      body.querySelector('[data-pick="none"]').addEventListener('click', () => { boxes.forEach((b) => { b.checked = false; }); sync(); });
+    }
+  });
 }
 
 export function openCharacter(ctx, charId) {
@@ -660,79 +855,299 @@ export function openCharacter(ctx, charId) {
     if (!c) return;
     const rels = ctx.data.relations.filter((r) => r.fromId === charId || r.toId === charId);
     const nameOf = new Map(ctx.data.characters.map((x) => [x.id, x.name]));
+    const roleOf = new Map(ctx.data.characters.map((x) => [x.id, x.role || '未定位']));
+
+    // 改完数据后重开档案弹窗（直接清掉当前弹窗栈，避免叠加）
+    const refresh = () => {
+      document.querySelectorAll('.modal-mask').forEach((m) => m.remove());
+      render();
+    };
+
+    // 总编辑：一次改完整张角色卡（弹窗底栏「编辑」与字段展开里的「编辑」共用）
+    const editForm = () => openForm({
+      title: `编辑 ${c.name}`, width: 620, fields: characterFields(), values: c, okText: '保存',
+      onSubmit: async (v) => {
+        await ctx.patch('characters', charId, v);
+        toast('已保存', 'success');
+        await ctx.reload();
+        refresh();
+      }
+    });
+
+    // 字段展开：档案里只显示部分，点开看全文（仍可一键转编辑）
+    const openField = (label, key) => {
+      const cur = ctx.data.characters.find((x) => x.id === charId) || c;
+      openModal({
+        title: `${cur.name} · ${label}`, width: 620,
+        html: `<div class="note-full">${esc(String(cur[key] == null ? '' : cur[key]).trim() || '（未填写）')}</div>`,
+        buttons: [
+          { label: '编辑', kind: 'primary', keepOpen: true, onClick: () => editForm() },
+          { label: '关闭', kind: 'ghost' }
+        ]
+      });
+    };
+
+    // 关系详情：列表里显示不全，点开看全部（可直接转编辑 / 删除）
+    const openRelView = (r) => {
+      const other = r.fromId === charId ? r.toId : r.fromId;
+      const otherName = nameOf.get(other) || '?';
+      const dirText = r.fromId === charId ? `${c.name} → ${otherName}` : `${otherName} → ${c.name}`;
+      const volatile = r.state === 'volatile';
+      openModal({
+        title: `${otherName} · ${r.label || '关系'}`,
+        subtitle: `${dirText} · ${volatile ? '可能变化' : '稳定'}`,
+        width: 560,
+        html: `
+          <div class="rel-detail">
+            <div class="rel-line"><span>关系</span><b>${esc(r.label || '—')}</b></div>
+            <div class="rel-line"><span>对象</span><b>${esc(otherName)}（${esc(roleOf.get(other) || '未定位')}）</b></div>
+            <div class="rel-line"><span>方向</span><b>${esc(dirText)}</b></div>
+            <div class="rel-line"><span>状态</span><b>${volatile ? '可能变化' : '稳定'}</b></div>
+            ${volatile && r.trend ? `<div class="rel-line"><span>走向</span><b>${esc(r.trend)}</b></div>` : ''}
+            <div class="rel-full">${esc(String(r.description == null ? '' : r.description).trim() || '（这条关系还没有填写说明）')}</div>
+          </div>`,
+        buttons: [
+          { label: '编辑', kind: 'primary', keepOpen: true, onClick: (_b, wrap) => {
+            closeModal(wrap);
+            openRelForm(r);
+          } },
+          { label: '删除', kind: 'danger', keepOpen: true, onClick: async (_b, wrap) => {
+            const sure = await openConfirm({
+              title: '删除关系',
+              message: `将删除「${c.name}」与「${otherName}」的关系（${r.label || ''}）。`,
+              danger: true, okText: '删除'
+            });
+            if (!sure) return;
+            closeModal(wrap);
+            await ctx.remove('relations', r.id);
+            await ctx.reload();
+            refresh();
+          } },
+          { label: '关闭', kind: 'ghost' }
+        ]
+      });
+    };
+
+    // 「出现在的线路」：节拍同理——只显示部分，点开看全部，可直接转编辑
+    const safeName = String(c.name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const beatHits = safeName
+      ? ctx.data.beats.filter((b) => new RegExp(safeName, 'i').test(`${b.title}${b.description || ''}`))
+      : [];
+    const lineOf = (b) => ctx.data.lines.find((l) => l.id === b.lineId) || null;
+    const beatNo = (b) => {
+      const sibs = ctx.data.beats.filter((x) => x.lineId === b.lineId).sort(byOrder);
+      return sibs.findIndex((x) => x.id === b.id) + 1;
+    };
+
+    const openBeatView = (b) => {
+      const line = lineOf(b);
+      const node = b.nodeId ? ctx.data.outline.find((n) => n.id === b.nodeId) : null;
+      const no = beatNo(b);
+      openModal({
+        title: b.title,
+        subtitle: `${line ? line.name : '未归属线路'}${b.status ? ` · ${BEAT_STATUS[b.status] || b.status}` : ''}`,
+        width: 560,
+        html: `
+          <div class="rel-detail">
+            <div class="rel-line"><span>线路</span><b>${esc(line ? line.name : '—')}${line ? `（${esc(ctx.meta.lineLabel[line.kind] || line.kind)}）` : ''}</b></div>
+            <div class="rel-line"><span>位置</span><b>${no > 0 ? `第 ${no} 拍` : '—'}</b></div>
+            <div class="rel-line"><span>状态</span><b>${esc(BEAT_STATUS[b.status] || b.status || '未标注')}</b></div>
+            ${node ? `<div class="rel-line"><span>大纲</span><b>${esc(node.title)}</b></div>` : ''}
+            <div class="rel-full">${esc(String(b.description == null ? '' : b.description).trim() || '（这个节拍还没有填写说明）')}</div>
+          </div>`,
+        buttons: [
+          { label: '编辑', kind: 'primary', keepOpen: true, onClick: (_x, wrap) => {
+            closeModal(wrap);
+            openBeat(ctx, b, async () => { await ctx.reload(); refresh(); });
+          } },
+          { label: '关闭', kind: 'ghost' }
+        ]
+      });
+    };
+
+    // 添加 / 编辑关系（含「可能变化」标记）
+    const openRelForm = (existing) => {
+      const isEdit = !!existing;
+      const origOther = existing ? (existing.fromId === charId ? existing.toId : existing.fromId) : null;
+      openForm({
+        title: isEdit ? '编辑关系' : '添加关系', width: 480,
+        fields: [
+          { key: 'toId', label: '对方角色', type: 'select', options: ctx.data.characters.filter((x) => x.id !== charId).map((x) => [x.id, x.name]), default: origOther || '' },
+          { key: 'label', label: '关系', placeholder: '如：师徒 / 宿敌 / 暗恋' },
+          { key: 'state', label: '关系状态', type: 'select', options: [['stable', '稳定'], ['volatile', '可能变化']], default: existing ? (existing.state || 'stable') : 'stable' },
+          { key: 'trend', label: '可能的变化方向', type: 'textarea', rows: 2, hint: '选「可能变化」时填写，例如：后期反目成仇' },
+          { key: 'description', label: '说明', type: 'textarea', rows: 2 }
+        ],
+        values: existing ? { toId: origOther, label: existing.label, state: existing.state || 'stable', trend: existing.trend || '', description: existing.description } : {},
+        okText: isEdit ? '保存' : '添加',
+        onSubmit: async (v) => {
+          if (!v.toId || !v.label) { toast('请填写完整', 'error'); return false; }
+          const state = v.state || 'stable';
+          const trend = state === 'volatile' ? (v.trend || '') : '';
+          let fromId; let toId;
+          if (isEdit) {
+            // 保持原方向：该角色原本是 from 就仍是 from
+            fromId = existing.fromId === charId ? charId : v.toId;
+            toId = existing.fromId === charId ? v.toId : charId;
+          } else {
+            fromId = charId; toId = v.toId;
+          }
+          const payload = { fromId, toId, label: v.label, state, trend, description: v.description };
+          if (isEdit) await ctx.patch('relations', existing.id, payload);
+          else await ctx.create('relations', payload);
+          toast(isEdit ? '已保存' : '已添加', 'success');
+          await ctx.reload();
+          refresh();
+        }
+      });
+    };
 
     openModal({
-      title: c.name, subtitle: c.role || '未定位', width: 720,
+      title: c.name, subtitle: c.role || '未定位', width: 860,
       html: `
         <div class="char-detail">
           <div class="cd-left">
-            ${[['别名', c.alias], ['年龄', c.age], ['外貌', c.appearance], ['性格', c.personality],
-        ['核心动机', c.motivation], ['弱点', c.flaw], ['人物弧光', c.arc], ['转折节点', c.beatNote]]
-        .map(([k, v]) => `<div class="cd-field"><span>${k}</span><p>${v ? esc(v) : '<i class="muted">待补充</i>'}</p></div>`).join('')}
+            ${[['别名', 'alias'], ['年龄', 'age'], ['外貌', 'appearance'], ['性格', 'personality'],
+        ['核心动机', 'motivation'], ['弱点', 'flaw'], ['人物弧光', 'arc'], ['转折节点', 'beatNote']]
+        .map(([k, key]) => {
+          const v = String(c[key] == null ? '' : c[key]).trim();
+          const long = v.length > 30;
+          return `<div class="cd-field${long ? ' clamped' : ''}">
+                    <span>${k}</span>
+                    <p>${v ? esc(v) : '<i class="muted">待补充</i>'}</p>
+                    ${long ? `<button class="cd-more" data-act="field" data-key="${key}" data-label="${k}">展开全文 · ${v.length} 字</button>` : ''}
+                  </div>`;
+        }).join('')}
           </div>
           <div class="cd-right">
             <h5>人物关系</h5>
-            ${rels.length ? `<ul class="rel-list">${rels.map((r) => {
+            ${rels.length ? `<ul class="rel-list cd-rel-list">${rels.map((r) => {
         const other = r.fromId === charId ? r.toId : r.fromId;
         const dir = r.fromId === charId ? '→' : '←';
-        return `<li><b>${esc(nameOf.get(other) || '?')}</b> <span class="rel-dir">${dir}</span> ${esc(r.label)}
-                  ${r.description ? `<em>${esc(r.description)}</em>` : ''}
-                  <button class="icon-btn danger" data-del-rel="${r.id}" title="删除关系">✕</button></li>`;
+        const dirTitle = r.fromId === charId ? '从他出发' : '指向他';
+        const volatile = r.state === 'volatile';
+        const desc = String(r.description == null ? '' : r.description).trim();
+        const trend = volatile ? String(r.trend || '').trim() : '';
+        const long = desc.length > 22 || trend.length > 22;
+        return `<li class="rel-item${long ? ' clamped' : ''}" data-view-rel="${r.id}" title="点开查看这条关系的全部信息">
+                  <div class="rel-top">
+                    <b>${esc(nameOf.get(other) || '?')}</b>
+                    <span class="role-badge">${esc(roleOf.get(other) || '')}</span>
+                    <span class="rel-dir" title="${dirTitle}">${dir}</span>
+                    <span class="rel-label">${esc(r.label || '')}</span>
+                    ${volatile ? '<span class="badge badge-volatile" title="该关系可能生变">可能变化</span>' : '<span class="badge badge-stable">稳定</span>'}
+                  </div>
+                  ${desc ? `<p class="rel-text rel-desc">${esc(desc)}</p>` : '<p class="rel-text rel-desc">（没有填写说明）</p>'}
+                  ${trend ? `<p class="rel-text rel-trend-line">走向：${esc(trend)}</p>` : ''}
+                  <div class="rel-foot">
+                    <span class="rel-more">${long ? '点开看全部' : '点开查看'}</span>
+                    <span class="rel-btns">
+                      <button class="rel-act" data-edit-rel="${r.id}">编辑</button>
+                      <button class="rel-act danger" data-del-rel="${r.id}">删除</button>
+                    </span>
+                  </div>
+                </li>`;
       }).join('')}</ul>` : '<p class="muted small">暂无关系记录</p>'}
             <button class="btn ghost sm block" data-act="add-rel">＋ 添加关系</button>
             <h5 class="mt">出现在的线路</h5>
-            ${(() => {
-        const tagRe = new RegExp(c.name, 'i');
-        const hits = ctx.data.beats.filter((b) => tagRe.test(`${b.title}${b.description || ''}`));
-        return hits.length
-          ? `<ul class="rel-list">${hits.map((b) => {
-            const line = ctx.data.lines.find((l) => l.id === b.lineId);
-            return `<li><b>${esc(b.title)}</b><em>${esc(line ? line.name : '')}</em></li>`;
-          }).join('')}</ul>`
-          : '<p class="muted small">线路中尚未提及该角色</p>';
-      })()}
+            ${beatHits.length
+        ? `<ul class="rel-list cd-rel-list">${beatHits.map((b) => {
+          const line = lineOf(b);
+          const desc = String(b.description == null ? '' : b.description).trim();
+          const long = desc.length > 22;
+          return `<li class="rel-item${long ? ' clamped' : ''}" data-view-beat="${b.id}" title="点开查看这个节拍的全部信息">
+                    <div class="rel-top">
+                      <b>${esc(b.title)}</b>
+                      ${line ? `<span class="kind-badge k-${esc(line.kind)}">${esc(ctx.meta.lineLabel[line.kind] || line.kind)}</span>` : ''}
+                      ${line ? `<span class="rel-label">${esc(line.name)}</span>` : ''}
+                      ${b.status ? `<span class="badge badge-stable">${esc(BEAT_STATUS[b.status] || b.status)}</span>` : ''}
+                    </div>
+                    ${desc ? `<p class="rel-text rel-desc">${esc(desc)}</p>` : '<p class="rel-text rel-desc">（没有填写说明）</p>'}
+                    <div class="rel-foot">
+                      <span class="rel-more">${long ? '点开看全部' : '点开查看'}</span>
+                      <span class="rel-btns"><button class="rel-act" data-edit-beat="${b.id}">编辑</button></span>
+                    </div>
+                  </li>`;
+        }).join('')}</ul>`
+        : '<p class="muted small">线路中尚未提及该角色</p>'}
           </div>
         </div>`,
       buttons: [
+        { label: c.pinned ? '📌 取消置顶' : '📌 置顶', kind: 'ghost', keepOpen: true, onClick: async () => {
+          await ctx.patch('characters', charId, { pinned: !c.pinned });
+          await ctx.reload();
+          refresh();
+        } },
+        { label: '🕸 关系网', kind: 'ghost', keepOpen: true, onClick: (_body, wrap) => {
+          closeModal(wrap);
+          ctx.sel.focusChar = charId;
+          ctx.sel.charGraph = true;
+          if (typeof ctx.toggleAgent === 'function') ctx.toggleAgent(false);
+          ctx.render();
+        } },
+        { label: '导出人物卡', kind: 'ghost', keepOpen: true, onClick: () => {
+          const text = charCardText(c, ctx.data);
+          const title = (ctx.data.project && ctx.data.project.title) || '作品';
+          try {
+            downloadText(`${title}-${c.name}-人物卡`, text);
+            toast('已导出 TXT（可在系统弹窗里选择保存位置）', 'success');
+          } catch (_) {
+            navigator.clipboard.writeText(text)
+              .then(() => toast('无法直接保存，已复制到剪贴板', 'info'))
+              .catch(() => toast('导出失败', 'error'));
+          }
+        } },
         { label: '删除角色', kind: 'danger', keepOpen: true, onClick: async () => {
           const sure = await openConfirm({ title: '删除角色', message: `将删除「${c.name}」及其关系记录。`, danger: true, okText: '删除' });
           if (!sure) return;
           await ctx.remove('characters', charId);
           toast('已删除', 'success');
+          document.querySelectorAll('.modal-mask').forEach((m) => m.remove());
         } },
         { label: 'AI 深化人设', kind: 'ghost', keepOpen: true, onClick: () => {
           ctx.askAI(`请深化角色「${c.name}」的人设：指出他当前设定里最薄弱的一环，补充童年经历与一个会让读者心疼的具体细节，然后直接更新到角色卡。`);
         } },
-        { label: '编辑', kind: 'primary', keepOpen: true, onClick: () => {
-          openForm({
-            title: `编辑 ${c.name}`, width: 620, fields: characterFields(), values: c, okText: '保存',
-            onSubmit: async (v) => { await ctx.patch('characters', charId, v); toast('已保存', 'success'); }
-          });
-        } }
+        { label: '编辑', kind: 'primary', keepOpen: true, onClick: () => editForm() }
       ],
       onMount: (body) => {
-        body.querySelector('[data-act="add-rel"]').addEventListener('click', () => {
-          openForm({
-            title: '添加关系', width: 480,
-            fields: [
-              { key: 'toId', label: '对方角色', type: 'select', options: ctx.data.characters.filter((x) => x.id !== charId).map((x) => [x.id, x.name]) },
-              { key: 'label', label: '关系', placeholder: '如：师徒 / 宿敌 / 暗恋' },
-              { key: 'description', label: '说明', type: 'textarea', rows: 2 }
-            ],
-            okText: '添加',
-            onSubmit: async (v) => {
-              if (!v.toId || !v.label) { toast('请填写完整', 'error'); return false; }
-              await ctx.create('relations', { fromId: charId, toId: v.toId, label: v.label, description: v.description });
-              toast('已添加', 'success');
-              await ctx.reload();
-              render();
-            }
+        body.querySelectorAll('[data-act="field"]').forEach((b) => b.addEventListener('click', () => openField(b.dataset.label, b.dataset.key)));
+        body.querySelector('[data-act="add-rel"]').addEventListener('click', () => openRelForm(null));
+        // 整行点开详情（关系 / 节拍各按自己的 data 属性分发）
+        body.querySelectorAll('.rel-item').forEach((li) => li.addEventListener('click', (e) => {
+          if (e.target.closest('[data-edit-rel],[data-del-rel],[data-edit-beat]')) return;
+          const rid = li.dataset.viewRel;
+          const bid = li.dataset.viewBeat;
+          if (rid) {
+            const r = ctx.data.relations.find((x) => x.id === rid);
+            if (r) openRelView(r);
+          } else if (bid) {
+            const b = ctx.data.beats.find((x) => x.id === bid);
+            if (b) openBeatView(b);
+          }
+        }));
+        body.querySelectorAll('[data-edit-beat]').forEach((b) => b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const beat = ctx.data.beats.find((x) => x.id === b.dataset.editBeat);
+          if (beat) openBeat(ctx, beat, async () => { await ctx.reload(); refresh(); });
+        }));
+        body.querySelectorAll('[data-edit-rel]').forEach((b) => b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const r = ctx.data.relations.find((x) => x.id === b.dataset.editRel);
+          if (r) openRelForm(r);
+        }));
+        body.querySelectorAll('[data-del-rel]').forEach((b) => b.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const r = ctx.data.relations.find((x) => x.id === b.dataset.delRel);
+          const other = r ? (r.fromId === charId ? r.toId : r.fromId) : '';
+          const sure = await openConfirm({
+            title: '删除关系',
+            message: `将删除「${c.name}」与「${nameOf.get(other) || '?'}」的关系。`,
+            danger: true, okText: '删除'
           });
-        });
-        body.querySelectorAll('[data-del-rel]').forEach((b) => b.addEventListener('click', async () => {
+          if (!sure) return;
           await ctx.remove('relations', b.dataset.delRel);
           await ctx.reload();
-          render();
+          refresh();
         }));
       }
     });
@@ -747,8 +1162,9 @@ const LINE_KINDS = [['main', '主线'], ['sub', '副线'], ['romance', '感情�
 export function lines(ctx) {
   const d = ctx.data;
   const ordered = d.lines.slice().sort((a, b) => {
-    const rank = (x) => (x.kind === 'main' ? 0 : x.kind === 'romance' ? 1 : x.kind === 'mystery' ? 2 : 3);
-    return rank(a) - rank(b) || byOrder(a, b);
+    const pin = (x) => (x.pinned ? 0 : 1);
+    if (pin(a) !== pin(b)) return pin(a) - pin(b);
+    return byRecent(a, b);
   });
 
   return {
@@ -782,6 +1198,11 @@ export function lines(ctx) {
       });
 
       root.querySelectorAll('[data-act="new-line"]').forEach((b) => b.addEventListener('click', () => openLineForm(null)));
+      root.querySelectorAll('[data-act="pin-line"]').forEach((b) => b.addEventListener('click', async () => {
+        const line = c.data.lines.find((l) => l.id === b.dataset.pinLine);
+        if (!line) return;
+        await c.patch('lines', line.id, { pinned: !line.pinned }); // patch 默认 reload + 重绘
+      }));
       root.querySelectorAll('[data-act="edit-line"]').forEach((b) => b.addEventListener('click', () => {
         openLineForm(c.data.lines.find((l) => l.id === b.dataset.editLine));
       }));
@@ -872,6 +1293,7 @@ function laneHtml(l, d, ctx) {
         </div>
         <p class="lane-desc">${esc(l.description || '（暂无说明）')}</p>
         <div class="lane-acts">
+          <button class="btn ghost xs${l.pinned ? ' lane-pinned' : ''}" data-act="pin-line" data-pin-line="${l.id}" title="${l.pinned ? '取消置顶' : '置顶'}">📌 ${l.pinned ? '已置顶' : '置顶'}</button>
           <button class="btn ghost xs" data-act="edit-line" data-edit-line="${l.id}">编辑</button>
           <button class="btn ghost xs" data-act="del-line" data-del-line="${l.id}">删除</button>
         </div>
@@ -898,7 +1320,7 @@ function laneHtml(l, d, ctx) {
     </div>`;
 }
 
-function openBeat(ctx, beat) {
+function openBeat(ctx, beat, onSaved) {
   openForm({
     title: '编辑节拍', width: 480,
     fields: [
@@ -909,7 +1331,11 @@ function openBeat(ctx, beat) {
     ],
     values: beat,
     okText: '保存',
-    onSubmit: async (v) => { await ctx.patch('beats', beat.id, v); toast('已保存', 'success'); }
+    onSubmit: async (v) => {
+      await ctx.patch('beats', beat.id, v);
+      toast('已保存', 'success');
+      if (onSaved) await onSaved();
+    }
   });
 }
 
@@ -926,6 +1352,27 @@ function flatOutlineOptions(nodes) {
 }
 
 /* ==================================================================== 章节 */
+
+/**
+ * 全屏写作模式开关（沉浸写作）。
+ * 用 body 上的类 + 固定定位的编辑器实现，不占用系统全屏，Esc 退出（在 app.js 统一监听）。
+ */
+export function setWritingFull(on) {
+  const next = on === undefined ? !document.body.classList.contains('writing-full') : !!on;
+  document.body.classList.toggle('writing-full', next);
+  document.querySelectorAll('[data-act="full"]').forEach((b) => {
+    if (b.closest('.editor-full-bar')) return;             // 顶栏那个固定写「退出全屏」
+    b.textContent = next ? '⛶ 退出全屏' : '⛶ 全屏';
+    b.title = next ? '退出全屏（Esc）' : '全屏写作（Esc 退出）';
+  });
+  if (next) {
+    const ta = document.getElementById('chapterContent');
+    if (ta) ta.focus();
+  }
+  return next;
+}
+
+const BEAT_STATUS = { idea: '灵感', planned: '已排', done: '已完成' };
 
 /** 章节列表：若存在关联大纲节点（如合并导入的「卷」），按卷分组显示，否则保持平铺 */
 function chapterItemsHtml(list, d, cur) {
@@ -976,21 +1423,61 @@ export function chapters(ctx) {
       </div>`,
 
     mount(root, c) {
-      root.querySelectorAll('[data-act="new"]').forEach((b) => b.addEventListener('click', async () => {
-        const ch = await c.create('chapters', { title: `第 ${c.data.chapters.length + 1} 章` }, (created) => { c.sel.chapterId = created.id; });
-        toast('已创建', 'success');
-      }));
-
-      root.querySelectorAll('.chapter-item').forEach((el) => {
-        el.addEventListener('click', () => { c.sel.chapterId = el.dataset.id; c.render(); });
-      });
-
-      if (!cur) return;
-
+      // 编辑框自动保存（防抖 700ms）。任何重绘前都会先 flush，避免丢最后一段输入。
       const save = debounce(async (patchObj) => {
         await c.patch('chapters', cur.id, patchObj, { silent: true });   // 静默：不重建编辑器，保住光标
         c.syncLocal();
       }, 700);
+
+      // 重绘会重建 DOM：重绘前先把编辑框里没保存的内容落盘。
+      // 点章节、改状态、新建、AI 插入正文都会触发重绘，任何一条路径漏了都会丢最后 700ms 的输入，
+      // 所以这里把它注册成通用钩子（render/reload 前统一执行），而不只是点章节时手动调。
+      const flushNow = () => {
+        if (!cur) return;
+        const t = root.querySelector('#chapterTitle'); if (!t) return;
+        const s = root.querySelector('#chapterSummary');
+        const cm = root.querySelector('#chapterContent');
+        const patch = {};
+        if (t.value !== (cur.title || '')) patch.title = cur.title = t.value;
+        if (s && s.value !== (cur.summary || '')) patch.summary = cur.summary = s.value;
+        if (cm && cm.value !== (cur.content || '')) patch.content = cur.content = cm.value;
+        save.cancel();     // 挂起的防抖由这次写入替代，避免它稍后拿着旧值再覆盖一遍
+        // 返回 promise：调用方（reload）可以等它写完再重新拉数据，避免「写后立刻读」读到旧值
+        if (Object.keys(patch).length) return c.patch('chapters', cur.id, patch, { silent: true });
+        return null;
+      };
+      if (c.registerFlush) c.registerFlush(flushNow);
+
+      // 新建章节后把它滚进视野（列表滚动位置本身由 render() 统一保留，不会再跳回第一章）
+      if (c.sel.chapterReveal) {
+        const id = c.sel.chapterReveal;
+        c.sel.chapterReveal = null;
+        const ni = root.querySelector(`.chapter-item[data-id="${id}"]`);
+        if (ni) ni.scrollIntoView({ block: 'nearest' });
+      }
+
+      const rerenderKeepScroll = () => {
+        flushNow();
+        c.render();                       // 滚动位置由 render() 统一保留
+      };
+
+      root.querySelectorAll('[data-act="new"]').forEach((b) => b.addEventListener('click', async () => {
+        await c.create('chapters', { title: `第 ${c.data.chapters.length + 1} 章` }, (created) => {
+          c.sel.chapterId = created.id;
+          c.sel.chapterReveal = created.id;
+        });
+        toast('已创建', 'success');
+      }));
+
+      root.querySelectorAll('.chapter-item').forEach((el) => {
+        el.addEventListener('click', () => {
+          if (c.sel.chapterId === el.dataset.id) return; // 再点当前章不做任何事
+          c.sel.chapterId = el.dataset.id;
+          rerenderKeepScroll();
+        });
+      });
+
+      if (!cur) return;
 
       const titleEl = root.querySelector('#chapterTitle');
       const summaryEl = root.querySelector('#chapterSummary');
@@ -1000,13 +1487,18 @@ export function chapters(ctx) {
       titleEl.addEventListener('input', () => save({ title: titleEl.value }));
       summaryEl.addEventListener('input', () => save({ summary: summaryEl.value }));
       contentEl.addEventListener('input', () => {
-        wcEl.textContent = `${contentEl.value.length} 字`;
+        const n = contentEl.value.length;
+        wcEl.textContent = `${n} 字`;
+        const fw = root.querySelector('#fullWords');
+        if (fw) fw.textContent = `${n} 字`;
         save({ content: contentEl.value });
       });
+      root.querySelectorAll('[data-act="full"]').forEach((b) => b.addEventListener('click', () => setWritingFull()));
+
       root.querySelector('#chapterStatus').addEventListener('change', (e) => c.patch('chapters', cur.id, { status: e.target.value }).then(() => c.syncLocal()));
 
       const nodeSel = root.querySelector('#chapterNode');
-      if (nodeSel) nodeSel.addEventListener('change', (e) => c.patch('chapters', cur.id, { nodeId: e.target.value || null }).then(() => c.render()));
+      if (nodeSel) nodeSel.addEventListener('change', (e) => c.patch('chapters', cur.id, { nodeId: e.target.value || null }, { silent: true }).then(() => { cur.nodeId = e.target.value || null; c.syncLocal(); }));
 
       root.querySelector('[data-act="chapter-ai"]').addEventListener('click', () => {
         if (!c.apiReady) {
@@ -1065,14 +1557,22 @@ export function chapters(ctx) {
 }
 
 function chapterEditor(cur, d, ctx) {
+  const isFull = typeof document !== 'undefined' && document.body.classList.contains('writing-full');
   return `
     <div class="editor">
+      <div class="editor-full-bar">
+        <span class="efb-tag">全屏写作</span>
+        <span class="efb-title">${esc(cur.title)}</span>
+        <span class="word-count" id="fullWords">${(cur.content || '').length} 字</span>
+        <button class="btn ghost sm" data-act="full">⛶ 退出全屏（Esc）</button>
+      </div>
       <div class="editor-head">
         <input class="editor-title" id="chapterTitle" value="${esc(cur.title)}" placeholder="章节标题" />
         <select id="chapterStatus" class="slim-select">
           ${[['todo', '待写'], ['draft', '草稿'], ['done', '完成']]
       .map(([v, l]) => `<option value="${v}" ${cur.status === v ? 'selected' : ''}>${l}</option>`).join('')}
         </select>
+        <button class="btn ghost sm" data-act="full" title="全屏写作（Esc 退出）">${isFull ? '⛶ 退出全屏' : '⛶ 全屏'}</button>
         <button class="btn ghost sm danger-text" data-act="chapter-del">删除</button>
       </div>
 
@@ -1100,7 +1600,7 @@ const WORLD_CATS = ['地理', '历史', '规则', '势力', '物品', '习俗', 
 export function world(ctx) {
   const d = ctx.data;
   const groups = {};
-  d.world.forEach((w) => { (groups[w.category || '其他'] ||= []).push(w); });
+  d.world.slice().sort(byRecent).forEach((w) => { (groups[w.category || '其他'] ||= []).push(w); });
   const cats = Object.keys(groups);
 
   return {
@@ -1153,6 +1653,9 @@ export function world(ctx) {
       }));
       root.querySelectorAll('[data-act="del"]').forEach((b) => b.addEventListener('click', async (e) => {
         e.stopPropagation();
+        const w = c.data.world.find((x) => x.id === b.dataset.id);
+        const sure = await openConfirm({ title: '删除设定', message: `将删除「${w ? w.title : ''}」，删除后不可恢复。确定？`, danger: true, okText: '删除' });
+        if (!sure) return;
         await c.remove('world', b.dataset.id);
         toast('已删除', 'success');
       }));
@@ -1184,7 +1687,12 @@ export function world(ctx) {
 
 export function foreshadow(ctx) {
   const d = ctx.data;
-  const list = d.foreshadow.slice().sort((a, b) => (a.status === b.status ? byOrder(a, b) : (a.status === 'paid-off' ? 1 : -1)));
+  // 未回收的排前面；勾选回收的进入「已回收」组且组内按勾选时间倒序（刚勾的在该组最前）
+  const list = d.foreshadow.slice().sort((a, b) => {
+    const done = (x) => (x.status === 'paid-off' ? 1 : 0);
+    if (done(a) !== done(b)) return done(a) - done(b);
+    return byRecent(a, b);
+  });
   const open = list.filter((f) => f.status !== 'paid-off').length;
 
   return {
@@ -1235,12 +1743,18 @@ export function foreshadow(ctx) {
       root.querySelectorAll('[data-act="new"]').forEach((b) => b.addEventListener('click', () => form(null)));
       root.querySelectorAll('[data-act="edit"]').forEach((b) => b.addEventListener('click', () => form(c.data.foreshadow.find((f) => f.id === b.dataset.id))));
       root.querySelectorAll('[data-act="del"]').forEach((b) => b.addEventListener('click', async () => {
+        const f = c.data.foreshadow.find((x) => x.id === b.dataset.id);
+        const sure = await openConfirm({ title: '删除伏笔', message: `将删除「${f ? f.title : ''}」，删除后不可恢复。确定？`, danger: true, okText: '删除' });
+        if (!sure) return;
         await c.remove('foreshadow', b.dataset.id);
         toast('已删除', 'success');
       }));
       root.querySelectorAll('[data-act="toggle"]').forEach((b) => b.addEventListener('click', async () => {
         const f = c.data.foreshadow.find((x) => x.id === b.dataset.id);
-        await c.patch('foreshadow', f.id, { status: f.status === 'paid-off' ? 'planted' : 'paid-off' });
+        const paidOff = f.status === 'paid-off';
+        await c.patch('foreshadow', f.id, paidOff
+          ? { status: 'planted', paidOffAt: null }
+          : { status: 'paid-off', paidOffAt: Date.now() });
       }));
 
       root.querySelector('[data-act="ai"]').addEventListener('click', () => {
@@ -1256,7 +1770,7 @@ const NOTE_CATS = ['灵感', '备忘', '待解决', '设定'];
 
 export function notes(ctx) {
   const d = ctx.data;
-  const list = d.notes.slice().sort((a, b) => ((b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)) || (b.createdAt || 0) - (a.createdAt || 0));
+  const list = d.notes.slice().sort((a, b) => ((b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)) || byRecent(a, b));
 
   return {
     html: `
@@ -1273,8 +1787,9 @@ export function notes(ctx) {
                 <button class="icon-btn ${n.pinned ? 'pinned' : ''}" data-act="pin" data-id="${n.id}" title="置顶">${n.pinned ? '★' : '☆'}</button>
               </header>
               <b>${esc(n.title)}</b>
-              ${n.content ? `<p>${esc(n.content)}</p>` : ''}
+              ${n.content ? `<p class="note-brief">${esc(n.content)}</p>` : ''}
               <footer>
+                <button data-act="view" data-id="${n.id}">展开全文</button>
                 <button data-act="edit" data-id="${n.id}">编辑</button>
                 <button data-act="del" data-id="${n.id}">删除</button>
               </footer>
@@ -1300,8 +1815,23 @@ export function notes(ctx) {
       });
 
       root.querySelectorAll('[data-act="new"]').forEach((b) => b.addEventListener('click', () => form(null)));
+      root.querySelectorAll('[data-act="view"]').forEach((b) => b.addEventListener('click', () => {
+        const n = c.data.notes.find((x) => x.id === b.dataset.id);
+        if (!n) return;
+        openModal({
+          title: n.title, subtitle: n.category || '备忘', width: 620,
+          html: `<div class="note-full">${esc(n.content || '（无内容）')}</div>`,
+          buttons: [
+            { label: '编辑', kind: 'primary', onClick: () => form(n) },
+            { label: '关闭', kind: 'ghost' }
+          ]
+        });
+      }));
       root.querySelectorAll('[data-act="edit"]').forEach((b) => b.addEventListener('click', () => form(c.data.notes.find((n) => n.id === b.dataset.id))));
       root.querySelectorAll('[data-act="del"]').forEach((b) => b.addEventListener('click', async () => {
+        const n = c.data.notes.find((x) => x.id === b.dataset.id);
+        const sure = await openConfirm({ title: '删除备忘', message: `将删除「${n ? n.title : ''}」，删除后不可恢复。确定？`, danger: true, okText: '删除' });
+        if (!sure) return;
         await c.remove('notes', b.dataset.id);
         toast('已删除', 'success');
       }));
@@ -1547,4 +2077,361 @@ function aiApplyList(ctx, res, { title, render, apply }) {
     setTimeout(() => wrap.remove(), 200);
     c.reload().then(() => toast(`已应用 ${n} 项`, 'success'));
   }
+}
+
+/* ================================================================ AI 记忆点 */
+
+/** 单章一行：标题、字数对比、记忆点编辑框 */
+function memoRow(c, i) {
+  const memo = String(c.memo || '');
+  const len = String(c.content || '').length;
+  return `
+    <div class="memo-row ${memo.trim() ? 'has-memo' : ''}" data-id="${c.id}">
+      <div class="memo-row-head">
+        <span class="memo-idx">${i + 1}</span>
+        <span class="memo-title" title="${esc(c.title || '')}">${esc(c.title || '（无题）')}</span>
+        <span class="memo-meta">正文 ${len} 字 · 记忆点 <b class="memo-len">${memo.length}</b> 字</span>
+        <span class="memo-acts">
+          <button class="btn primary xs" data-act="gen-one" title="AI 生成本章记忆点">✨ 生成</button>
+          <button class="btn ghost xs" data-act="clear-one" title="清空本章记忆点">清空</button>
+        </span>
+      </div>
+      <textarea class="memo-input" rows="2" placeholder="本章记忆点：出场人物 / 关键事件 / 推进到哪一步 / 埋下或回收的伏笔">${esc(memo)}</textarea>
+    </div>`;
+}
+
+/** 把全书已生成的记忆点拼成一段纯文本（供复制给外部 AI 使用） */
+function buildMemoAllText(list, title) {
+  const lines = [`《${title}》剧情记忆点`, ''];
+  list.forEach((c, i) => {
+    const memo = String(c.memo || '').trim();
+    if (memo) lines.push(`第${i + 1}章 ${c.title}：${memo}`);
+  });
+  return lines.join('\n');
+}
+
+/** 解码 TXT：优先 UTF-8，出现乱码就回退 GBK（很多 TXT 是 GBK 存的） */
+function decodeTextBuf(buf) {
+  try {
+    const utf8 = new TextDecoder('utf-8').decode(buf);
+    if (utf8.includes('\uFFFD')) {
+      try { return new TextDecoder('gbk').decode(buf); } catch (_) { /* 浏览器不支持则用 utf-8 */ }
+    }
+    return utf8;
+  } catch (_) { return ''; }
+}
+
+/**
+ * 把记忆点 TXT 解析并对应到章节。认得四种写法；认不出来的行按顺序补进还没匹配的章节：
+ *   第3章 主角登场…      → 按序号
+ *   3. 主角登场…         → 按序号
+ *   雨夜：主角登场…      → 按标题
+ *   主角登场…            → 按顺序
+ */
+function parseMemoText(text, chapters) {
+  const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  const used = new Set();
+  const entries = [];
+  const pending = [];
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    let m = line.match(/^第\s*(\d+)\s*[章节節][^\n:：]*[:：\s]\s*(.*)$/);
+    if (!m) m = line.match(/^第\s*(\d+)\s*[章节節]\s*(.*)$/);
+    if (!m) m = line.match(/^(\d+)\s*[.、．)）]\s*(.*)$/);
+    if (m) {
+      const ch = chapters[Number(m[1]) - 1];
+      const memo = String(m[2] || '').trim();
+      if (ch && memo) { entries.push({ id: ch.id, title: ch.title, memo, by: 'index' }); used.add(ch.id); continue; }
+    }
+    // 《标题》：内容  /  标题：内容
+    const tm = line.match(/^[《]?([^》]+)[》]?\s*[:：]\s*(.*)$/);
+    if (tm) {
+      const name = String(tm[1] || '').trim();
+      const body = String(tm[2] || '').trim();
+      const hit = name && body && chapters.find((c) => {
+        const t = String(c.title || '').trim();
+        return t === name || t.includes(name) || name.includes(t);
+      });
+      if (hit) { entries.push({ id: hit.id, title: hit.title, memo: body, by: 'title' }); used.add(hit.id); continue; }
+    }
+    pending.push(line);
+  }
+
+  let p = 0;
+  for (const c of chapters) {
+    if (used.has(c.id)) continue;
+    if (p >= pending.length) break;
+    entries.push({ id: c.id, title: c.title, memo: pending[p++], by: 'order' });
+    used.add(c.id);
+  }
+  const order = new Map(chapters.map((c, i) => [c.id, i]));
+  entries.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  return { entries, leftover: Math.max(0, pending.length - p) };
+}
+
+/** 导入预览：可勾选、可直接改，确认后再写回各章 */
+function openMemoImportDialog(c, entries, leftover) {
+  const byLabel = (b) => (b === 'index' ? '按序号' : b === 'title' ? '按标题' : '按顺序');
+  openModal({
+    title: '导入记忆点',
+    subtitle: `识别到 ${entries.length} 条${leftover ? `（另有 ${leftover} 行没用上）` : ''} · 可在下面直接修改`,
+    width: 720,
+    footerLeft: '<span class="muted small">原本已有记忆点的默认不勾选，避免覆盖；要覆盖就手动勾上</span>',
+    html: `
+      <div class="memo-import-list">
+        ${entries.map((e, i) => `
+          <label class="memo-import-row ${e.hasMemo ? 'is-overwrite' : ''}" data-i="${i}">
+            <input type="checkbox" ${e.hasMemo ? '' : 'checked'} />
+            <div class="mi-head">
+              <b>${esc(e.title || '（无题）')}</b>
+              <span class="mi-by">${byLabel(e.by)}</span>
+              ${e.hasMemo ? '<span class="mi-tag">已有记忆点 · 将覆盖</span>' : ''}
+            </div>
+            <textarea class="mi-memo" rows="2">${esc(e.memo)}</textarea>
+          </label>`).join('')}
+      </div>`,
+    buttons: [
+      { label: '取消', kind: 'ghost' },
+      {
+        label: '导入选中', kind: 'primary', keepOpen: true,
+        onClick: async (body, wrap) => {
+          const picked = [];
+          [...body.querySelectorAll('.memo-import-row')].forEach((row) => {
+            if (!row.querySelector('input[type=checkbox]').checked) return;
+            const memo = row.querySelector('.mi-memo').value.trim();
+            if (memo) picked.push({ id: entries[Number(row.dataset.i)].id, memo });
+          });
+          if (!picked.length) { toast('没有勾选任何条', 'error'); return false; }
+          for (const it of picked) await c.patch('chapters', it.id, { memo: it.memo }, { silent: true });
+          await c.reload();
+          closeModal(wrap);
+          toast(`已导入 ${picked.length} 条记忆点`, 'success');
+        }
+      }
+    ]
+  });
+}
+
+/**
+ * AI 记忆点：把每章正文压缩成一小段剧情摘要，让 AI 用最少的字掌握全书剧情，
+ * 不必每次都读取全文。数据保存在章节的 memo 字段上。
+ */
+export function memos(ctx) {
+  const d = ctx.data;
+  const list = d.chapters.slice().sort(byOrder);
+  const srcWords = list.reduce((s, c) => s + String(c.content || '').length, 0);
+  const memoWords = list.reduce((s, c) => s + String(c.memo || '').length, 0);
+  const withContent = list.filter((c) => String(c.content || '').trim()).length;
+  const doneCount = list.filter((c) => String(c.memo || '').trim()).length;
+  const ratio = srcWords ? Math.round((memoWords / srcWords) * 1000) / 10 : 0;
+
+  const stats = [
+    { label: '章节总数', value: list.length, sub: `${withContent} 章有正文`, icon: '📄' },
+    { label: '已生成记忆点', value: doneCount, sub: `待生成 ${Math.max(0, withContent - doneCount)} 章`, icon: '🧠' },
+    { label: '正文总字数', value: fmtNum(srcWords), sub: '原文规模', icon: '✍' },
+    { label: '记忆点字数', value: fmtNum(memoWords), sub: srcWords ? `约为原文 ${ratio}%` : '—', icon: '⚡' }
+  ];
+
+  return {
+    html: `
+      <div class="page memo-view">
+        <section class="memo-head">
+          <div class="memo-head-main">
+            <h3>🧠 AI 记忆点</h3>
+            <p class="muted small">把每章正文压成一小段剧情摘要。AI 助手读了它就知道全书讲了什么、讲到哪，不必每次都读原文。</p>
+          </div>
+          <div class="memo-head-stats">
+            ${stats.map((s) => `
+              <div class="memo-stat">
+                <span class="memo-stat-ico">${s.icon}</span>
+                <div><b>${esc(s.value)}</b><span>${esc(s.label)}</span><em>${esc(s.sub)}</em></div>
+              </div>`).join('')}
+          </div>
+        </section>
+
+        <div class="memo-toolbar">
+          <button class="btn primary sm" data-act="gen-missing" ${withContent ? '' : 'disabled'}>✨ 生成缺失的记忆点</button>
+          <button class="btn ghost sm" data-act="gen-all" ${withContent ? '' : 'disabled'}>↻ 全部重新生成</button>
+          <button class="btn ghost sm" data-act="download" ${doneCount ? '' : 'disabled'}>⬇ 下载 TXT</button>
+          <button class="btn ghost sm" data-act="import" ${list.length ? '' : 'disabled'}>📥 导入 TXT</button>
+          <button class="btn ghost sm danger-text" data-act="clear" ${doneCount ? '' : 'disabled'}>清空全部</button>
+          <span class="memo-tip">${ctx.apiReady ? '' : '未配置模型，将用本地压缩（较粗糙）；到右上「设置」配置后更佳'}</span>
+        </div>
+
+        <div class="memo-progress" id="memoProgress" hidden>
+          <div class="memo-bar"><i id="memoBarFill"></i></div>
+          <span id="memoProgressText"></span>
+          <button class="btn ghost xs" id="memoStop">停止</button>
+        </div>
+
+        <div class="memo-list">
+          ${list.length
+        ? list.map((c, i) => memoRow(c, i)).join('')
+        : emptyBox('这部作品还没有章节。先去「章节」写下内容，再回来生成记忆点。', '<button class="btn primary sm" data-act="goto-chapters">去「章节」</button>')}
+        </div>
+      </div>`,
+
+    mount(root, c) {
+      const prog = root.querySelector('#memoProgress');
+      const bar = root.querySelector('#memoBarFill');
+      const progText = root.querySelector('#memoProgressText');
+      const stopBtn = root.querySelector('#memoStop');
+      let stopFlag = false;
+      let running = false;
+
+      const showProg = () => { prog.hidden = false; };
+      const hideProg = () => { prog.hidden = true; bar.style.width = '0%'; };
+      const setProg = (done, total, text) => {
+        bar.style.width = `${total ? Math.round((done / total) * 100) : 0}%`;
+        progText.textContent = text || `已完成 ${done} / ${total}`;
+      };
+
+      function applyToDom(id, memo) {
+        const row = root.querySelector(`.memo-row[data-id="${id}"]`);
+        if (row) {
+          const ta = row.querySelector('.memo-input');
+          if (ta) ta.value = memo;
+          const lenEl = row.querySelector('.memo-len');
+          if (lenEl) lenEl.textContent = String(memo.length);
+          row.classList.toggle('has-memo', Boolean(memo.trim()));
+        }
+        // 同步内存数据，好让侧栏「已生成章节数」实时跟上（静默保存不会重拉数据）
+        const item = c.data.chapters.find((x) => x.id === id);
+        if (item) item.memo = memo;
+        c.syncLocal();
+      }
+
+      async function runBatch(ids) {
+        if (running || !ids.length) return;
+        running = true; stopFlag = false;
+        showProg();
+        let ok = 0; let fail = 0;
+        for (let i = 0; i < ids.length; i++) {
+          if (stopFlag) break;
+          setProg(i, ids.length, `正在生成 ${i + 1} / ${ids.length}…`);
+          try {
+            const res = await api.aiMemos(c.projectId, { chapterIds: [ids[i]], onlyMissing: false });
+            const up = (res.updated && res.updated[0]) || null;
+            if (up) { ok += 1; applyToDom(up.id, up.memo || ''); } else { fail += 1; }
+          } catch (_) { fail += 1; }
+          setProg(i + 1, ids.length, `已完成 ${i + 1} / ${ids.length}（成功 ${ok}）`);
+        }
+        running = false;
+        hideProg();
+        await c.reload();
+        if (stopFlag) toast('已停止', 'info');
+        else toast(`生成完成：成功 ${ok} 章${fail ? `，失败 ${fail} 章` : ''}`, fail && !ok ? 'error' : 'success');
+      }
+
+      if (stopBtn) stopBtn.addEventListener('click', () => { stopFlag = true; });
+
+      root.querySelectorAll('[data-act="gen-one"]').forEach((b) => b.addEventListener('click', async () => {
+        const row = b.closest('.memo-row');
+        const id = row.dataset.id;
+        const old = b.textContent;
+        b.disabled = true; b.textContent = '生成中…';
+        try {
+          const res = await api.aiMemos(c.projectId, { chapterIds: [id], onlyMissing: false });
+          const up = (res.updated && res.updated[0]) || null;
+          if (up) { applyToDom(id, up.memo || ''); c.syncLocal(); toast('已生成', 'success'); }
+          else toast('该章暂无正文，无法生成', 'error');
+        } catch (err) { toast(err.message, 'error'); } finally { b.disabled = false; b.textContent = old; }
+      }));
+
+      root.querySelectorAll('[data-act="clear-one"]').forEach((b) => b.addEventListener('click', async () => {
+        const id = b.closest('.memo-row').dataset.id;
+        await c.patch('chapters', id, { memo: '' }, { silent: true });
+        applyToDom(id, '');
+        c.syncLocal();
+      }));
+
+      root.querySelectorAll('.memo-input').forEach((ta) => {
+        const row = ta.closest('.memo-row');
+        const id = row.dataset.id;
+        const save = debounce(() => {
+          c.patch('chapters', id, { memo: ta.value }, { silent: true }).then(() => c.syncLocal());
+          row.classList.toggle('has-memo', Boolean(ta.value.trim()));
+          const lenEl = row.querySelector('.memo-len');
+          if (lenEl) lenEl.textContent = String(ta.value.length);
+        }, 600);
+        ta.addEventListener('input', save);
+      });
+
+      const missingIds = () => list
+        .filter((c2) => String(c2.content || '').trim() && !String(c2.memo || '').trim())
+        .map((c2) => c2.id);
+      const allContentIds = () => list.filter((c2) => String(c2.content || '').trim()).map((c2) => c2.id);
+
+      const genMissing = root.querySelector('[data-act="gen-missing"]');
+      if (genMissing) genMissing.addEventListener('click', () => runBatch(missingIds()));
+
+      const genAll = root.querySelector('[data-act="gen-all"]');
+      if (genAll) genAll.addEventListener('click', async () => {
+        const ids = allContentIds();
+        const yes = await openConfirm({
+          title: '全部重新生成', message: `将重新生成 ${ids.length} 章的记忆点，覆盖现有内容。继续？`, okText: '开始生成'
+        });
+        if (yes) runBatch(ids);
+      });
+
+      const dlBtn = root.querySelector('[data-act="download"]');
+      if (dlBtn) dlBtn.addEventListener('click', () => {
+        const text = buildMemoAllText(list, d.project.title || '作品');
+        const name = `${d.project.title || '作品'}-记忆点`;
+        try {
+          downloadText(name, text);
+          toast('已导出 TXT（可在系统弹窗里选择保存位置）', 'success');
+        } catch (_) {
+          // 极少数环境拦截了自动下载：退回到手动复制
+          navigator.clipboard.writeText(text)
+            .then(() => toast('无法直接保存，已复制到剪贴板', 'info'))
+            .catch(() => {
+              openModal({
+                title: '全书记忆点', subtitle: '复制下面这段即可交给外部 AI', width: 640, footer: false,
+                html: `<textarea class="memo-copy" rows="16">${esc(text)}</textarea>`
+              });
+            });
+        }
+      });
+
+      const clearBtn = root.querySelector('[data-act="clear"]');
+      if (clearBtn) clearBtn.addEventListener('click', async () => {
+        const yes = await openConfirm({ title: '清空全部记忆点', message: `将清空 ${doneCount} 章的记忆点（章节正文不受影响），之后可重新生成。确定？`, danger: true, okText: '清空' });
+        if (!yes) return;
+        for (const c2 of list) {
+          if (String(c2.memo || '').trim()) await c.patch('chapters', c2.id, { memo: '' }, { silent: true });
+        }
+        await c.reload();
+        toast('已清空', 'success');
+      });
+
+      const importBtn = root.querySelector('[data-act="import"]');
+      if (importBtn) importBtn.addEventListener('click', () => {
+        const inp = document.createElement('input');
+        inp.type = 'file';
+        inp.accept = '.txt,text/plain';
+        inp.hidden = true;
+        document.body.appendChild(inp);
+        inp.addEventListener('change', async () => {
+          const file = inp.files && inp.files[0];
+          inp.remove();
+          if (!file) return;
+          const text = stripBom(decodeTextBuf(await file.arrayBuffer()));
+          const { entries, leftover } = parseMemoText(text, list);
+          if (!entries.length) { toast('没从这个文件里识别出可用的记忆点', 'error'); return; }
+          entries.forEach((e) => {
+            const ch = list.find((x) => x.id === e.id);
+            e.hasMemo = !!String((ch && ch.memo) || '').trim();
+          });
+          openMemoImportDialog(c, entries, leftover);
+        });
+        inp.click();
+      });
+
+      const gotoBtn = root.querySelector('[data-act="goto-chapters"]');
+      if (gotoBtn) gotoBtn.addEventListener('click', () => c.setView('chapters'));
+    }
+  };
 }

@@ -89,6 +89,8 @@ export default {
   aiGenerate: (projectId, kind, params) => post('/api/ai/generate', { projectId, kind, params }),
   aiContinue: (projectId, chapterId, instruction, words) =>
     post('/api/ai/continue', { projectId, chapterId, instruction, words }),
+  /** 生成 AI 记忆点：opts 可含 { chapterIds, onlyMissing } */
+  aiMemos: (projectId, opts = {}) => post('/api/ai/memos', { projectId, ...opts }),
   aiContext: (projectId) => get(`/api/ai/context/${projectId}`),
   clearMessages: (pid) => del(`/api/projects/${pid}/messages`)
 };

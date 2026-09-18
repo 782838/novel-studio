@@ -293,17 +293,44 @@ function buildChapterText(projectId) {
     .slice()
     .sort((a, b) => (a.order || 0) - (b.order || 0));
   if (!chapters.length) return '（暂无章节）';
-  const MAX = 150;
-  const list = chapters.slice(0, MAX).map((c) => {
+  const MAX = 200;
+  const list = chapters.slice(0, MAX).map((c, i) => {
     const wc = (c.content || '').length;
-    const head = trunc((c.content || '').replace(/[#>*`]/g, ''), 60);
-    return `- [${c.status || 'todo'}] ${c.title}（${wc}字）⟦id:${c.id}⟧${head ? ` 开头：${head}` : ''}`;
+    const memo = String(c.memo || '').replace(/\s+/g, ' ').trim();
+    // 有记忆点就优先给摘要——AI 据此即知该章讲了什么，无需读正文
+    const tail = memo
+      ? `\n    记忆点：${trunc(memo, 400)}`
+      : (() => {
+        const head = trunc((c.content || '').replace(/[#>*`]/g, ''), 60);
+        return head ? ` 开头：${head}` : '';
+      })();
+    return `- [${c.status || 'todo'}] 第${i + 1}章 ${c.title}（${wc}字）⟦id:${c.id}⟧${tail}`;
   });
   if (chapters.length > MAX) {
     list.push(`- ……（其余 ${chapters.length - MAX} 章未列出，可用 read_chapter 按 index 读取）`);
   }
-  list.push('（注意：这里只有标题与开头 60 字，不含正文全文。要分析或续写某一章，先调用 read_chapter 读原文。）');
+  list.push('（注意：带「记忆点」的章节已给出剧情摘要，可直接据此判断剧情，无需读正文；只有需要细节或续写时才用 read_chapter 读原文。）');
   return list.join('\n');
+}
+
+/**
+ * 全书「剧情记忆点」总览——把各章已生成的记忆点按顺序串起来。
+ * 这是让 AI 用尽可能少的字数掌握「讲了什么、讲了多少、讲到哪」的关键段落。
+ */
+function buildMemoText(projectId) {
+  const chapters = store.byProject('chapters', projectId)
+    .slice()
+    .sort((a, b) => (a.order || 0) - (b.order || 0));
+  if (!chapters.length) return '';
+  const lines = [];
+  let covered = 0;
+  chapters.forEach((c, i) => {
+    const memo = String(c.memo || '').replace(/\s+/g, ' ').trim();
+    if (memo) { covered += 1; lines.push(`- 第${i + 1}章《${c.title}》：${memo}`); }
+    else if (String(c.content || '').trim()) lines.push(`- 第${i + 1}章《${c.title}》：（尚未生成记忆点）`);
+  });
+  if (!covered) return '';
+  return `共 ${chapters.length} 章，已生成 ${covered} 章记忆点：\n${lines.join('\n')}`;
 }
 
 function buildWorldText(projectId) {
@@ -336,6 +363,7 @@ function buildNoteText(projectId) {
 function buildContext(projectId, currentChapterId) {
   const project = store.getProject(projectId);
   if (!project) throw new Error('项目不存在');
+  const memoSect = buildMemoText(projectId);
   const parts = [
     `# 《${project.title}》`,
     project.genre ? `类型：${project.genre}` : '',
@@ -349,6 +377,9 @@ function buildContext(projectId, currentChapterId) {
     '',
     '## 故事线',
     buildLineText(projectId),
+    '',
+    memoSect ? '## 剧情记忆点（全书进度速览）' : '',
+    memoSect,
     '',
     '## 章节',
     buildChapterText(projectId),
@@ -1268,6 +1299,95 @@ async function continueChapter({ projectId, chapterId, instruction = '', words =
 
 // ---------------------------------------------------------------- 演示模式
 
+// ---------------------------------------------------------------- AI 记忆点
+
+/** 去掉 markdown 包裹、多余空白，得到干净的一句话摘要 */
+function cleanMemoText(s) {
+  let t = String(s || '').replace(/^```[a-zA-Z]*\s*/, '').replace(/```\s*$/, '');
+  t = t.replace(/^#+\s*/, '');
+  return t.replace(/\s+/g, ' ').trim();
+}
+
+/** 未配置模型时的本地降级：按句抽取正文前几句，凑到 ~150 字 */
+function localMemo(chapter) {
+  const text = String(chapter.content || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  const sentences = text.split(/(?<=[。！？!?…”」』])/).filter((s) => s.trim());
+  let out = '';
+  for (const s of sentences) {
+    if ((out + s).length > 150) break;
+    out += s;
+  }
+  if (!out) out = text.slice(0, 150);
+  return `${out}${text.length > out.length ? '……' : ''}`;
+}
+
+/** 给单章生成记忆点（有模型走模型，无模型走本地压缩） */
+async function memoizeChapter({ chapter }) {
+  const content = String(chapter.content || '').trim();
+  if (!content) return '';
+  if (!llmEnabled()) return localMemo(chapter);
+  const json = await callChat({
+    messages: [
+      { role: 'system', content: '你是小说编辑助手，负责把章节正文压缩成极简的「剧情记忆点」，用于让 AI 在不读全文的情况下回忆剧情。' },
+      {
+        role: 'user',
+        content: [
+          `章节标题：${chapter.title || '（无题）'}`,
+          chapter.summary ? `作者备注：${chapter.summary}` : '',
+          '',
+          '章节正文：',
+          content.slice(0, 8000),
+          '',
+          '请把这一章压缩成一段剧情记忆点，100~180 字，须包含：',
+          '1) 出场的关键人物；2) 发生的关键事件及结果；3) 剧情推进到哪一步（哪条线、什么阶段）；4) 埋下或回收的伏笔。',
+          '只输出记忆点本身：不要标题、不要编号、不要分点符号、不要任何解释，用陈述句，去掉景物与对话细节。'
+        ].filter(Boolean).join('\n')
+      }
+    ],
+    maxTokens: 400,
+    temperature: 0.3
+  });
+  return cleanMemoText(json?.choices?.[0]?.message?.content || '');
+}
+
+/**
+ * 批量生成记忆点。
+ * chapterIds 为空 => 对所有章节；onlyMissing=true 时只补尚未生成记忆点的章节。
+ * 单章调用（chapterIds 传一个）便于前端逐章推进、显示进度、可中断。
+ */
+async function generateMemos({ projectId, chapterIds, onlyMissing = true }) {
+  const all = store.byProject('chapters', projectId)
+    .slice()
+    .sort((a, b) => (a.order || 0) - (b.order || 0));
+  if (!all.length) throw new Error('这部作品还没有章节');
+  let targets = all;
+  if (Array.isArray(chapterIds) && chapterIds.length) {
+    const set = new Set(chapterIds);
+    targets = all.filter((c) => set.has(c.id));
+  }
+  if (onlyMissing) targets = targets.filter((c) => !String(c.memo || '').trim());
+
+  const updated = [];
+  const skipped = [];
+  for (const c of targets) {
+    if (!String(c.content || '').trim()) { skipped.push({ id: c.id, title: c.title, reason: '暂无正文' }); continue; }
+    try {
+      const memo = await memoizeChapter({ chapter: c });
+      if (memo) {
+        store.update('chapters', c.id, { memo });
+        updated.push({ id: c.id, title: c.title, memo, order: c.order || 0 });
+      } else {
+        skipped.push({ id: c.id, title: c.title, reason: '生成结果为空' });
+      }
+    } catch (err) {
+      skipped.push({ id: c.id, title: c.title, reason: err.message });
+    }
+  }
+  store.flush();
+  return { demo: !llmEnabled(), total: all.length, processed: targets.length, updated, skipped };
+}
+
 function demoReply(projectId, message, ops) {
   const exec = makeExecutor(projectId, ops);
   const text = String(message || '');
@@ -1410,6 +1530,7 @@ function pickName(seed = '') {
 module.exports = {
   settings, llmEnabled, endpointUrl, testConnection, callChat,
   buildContext, buildOutlineText, buildCharacterText, buildLineText,
-  runAgent, generate, continueChapter, analyzeNovel, PALETTE, pickColor,
+  buildChapterText, buildMemoText,
+  runAgent, generate, continueChapter, analyzeNovel, generateMemos, PALETTE, pickColor,
   makeExecutor
 };

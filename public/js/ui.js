@@ -21,6 +21,40 @@ export function debounce(fn, ms = 500) {
   return wrapped;
 }
 
+/* ---------------- 下载 ---------------- */
+/** 文件名去掉 Windows 不允许的字符，避免保存失败 */
+export function safeFileName(name, ext = 'txt') {
+  const clean = String(name || '未命名')
+    .replace(/[\\/:*?"<>|\r\n\t]/g, '_')
+    .replace(/^\.+/, '')
+    .trim() || '未命名';
+  return clean.endsWith(`.${ext}`) ? clean : `${clean}.${ext}`;
+}
+
+/**
+ * 把一段文本存成文件下载。
+ * 加 UTF-8 BOM，保证 Windows 记事本打开中文不乱码（读取时用 stripBom 去掉）。
+ * 桌面端（Electron）会弹系统「另存为」对话框，由用户选保存位置。
+ */
+export function downloadText(fileName, text) {
+  const blob = new Blob([`\uFEFF${text}`], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = safeFileName(fileName, 'txt');
+  a.rel = 'noopener';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 1500);
+  return a.download;
+}
+
+/** 去掉文件开头的 UTF-8 BOM（我们自己导出的 TXT 会带） */
+export function stripBom(text) {
+  return String(text || '').replace(/^\uFEFF/, '');
+}
+
 /* ---------------- Toast ---------------- */
 let toastRoot = null;
 export function toast(message, kind = 'info', ms = 2600) {

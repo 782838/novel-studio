@@ -7,13 +7,14 @@
  *   4) 打 tag v<version> 并推送
  *   5) 创建 Release，并把 dist 里的安装包作为附件上传
  *
- * 用法（token 只用于本次运行，不会写进 .git/config）：
- *   GITHUB_TOKEN=ghp_xxx node build/publish.js
- *   或  node build/publish.js ghp_xxx
+ * 用法：
+ *   node build/publish.js                         # 本机凭据管理器里已有 GitHub 登录 → 自动取用，无需手输 token
+ *   GITHUB_TOKEN=ghp_xxx node build/publish.js     # 或显式给 token
  *
  * 可选环境变量：
  *   REPO_NAME   仓库名，默认 novel-studio
  *   REPO_DESC   仓库描述
+ *   SKIP_GIT=1      跳过「推代码 / 推标签」（这两步交给 SSH，本脚本只负责 Release 与附件）
  *   SKIP_RELEASE=1  只推代码，不发 Release
  */
 const fs = require('fs');
@@ -24,13 +25,34 @@ const ROOT = path.join(__dirname, '..');
 const GIT = process.env.GIT_BIN
   || 'C:/Users/35546/.workbuddy/binaries/PortableGit/versions/1.2.0/cmd/git.exe';
 
-const TOKEN = process.env.GITHUB_TOKEN || process.argv[2];
 const REPO = process.env.REPO_NAME || 'novel-studio';
 const DESC = process.env.REPO_DESC || '本地运行的小说辅助创作工作台：大纲/角色/线路/章节/伏笔一站管理，AI 助手可直接读写项目数据。零依赖，数据全部留在本机。';
 const SKIP_RELEASE = process.env.SKIP_RELEASE === '1';
+const SKIP_GIT = process.env.SKIP_GIT === '1';
+
+/**
+ * 从本机凭据管理器取 GitHub 凭据（Git Credential Manager 缓存的那枚）。
+ * 实测偶发返回空，所以循环重试；拿不到就返回空，交给上层报错。
+ */
+function tokenFromCredentialManager() {
+  for (let i = 0; i < 6; i++) {
+    const r = spawnSync(GIT, ['credential', 'fill'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      input: 'protocol=https\nhost=github.com\n\n'
+    });
+    const m = (r.stdout || '').match(/^password=(.+)$/m);
+    if (m && m[1].trim()) return m[1].trim();
+  }
+  return '';
+}
+
+const TOKEN = process.env.GITHUB_TOKEN || process.argv[2] || tokenFromCredentialManager();
+const TOKEN_SOURCE = process.env.GITHUB_TOKEN ? '环境变量'
+  : (process.argv[2] ? '命令行参数' : '本机凭据管理器');
 
 if (!TOKEN) {
-  console.error('缺少 token。用法：GITHUB_TOKEN=ghp_xxx node build/publish.js');
+  console.error('拿不到 GitHub 凭据。可显式提供：GITHUB_TOKEN=ghp_xxx node build/publish.js');
   process.exit(1);
 }
 
@@ -87,7 +109,7 @@ async function api(method, url, body) {
     process.exit(1);
   }
   const owner = me.json.login;
-  console.log(`  ✓ 已认证为 ${owner}${me.json.name ? `（${me.json.name}）` : ''}`);
+  console.log(`  ✓ 已认证为 ${owner}${me.json.name ? `（${me.json.name}）` : ''}　凭据来源：${TOKEN_SOURCE}`);
 
   // 2) 创建仓库
   console.log('\n== 2. 创建仓库 ==');
@@ -113,30 +135,40 @@ async function api(method, url, body) {
   const repoUrl = `https://github.com/${owner}/${REPO}`;
 
   // 3) 推送代码（token 只在这一次命令里出现，不落盘）
-  console.log('\n== 3. 推送代码 ==');
   const pushUrl = `https://x-access-token:${TOKEN}@github.com/${owner}/${REPO}.git`;
-  git(['-c', 'credential.helper=', 'push', pushUrl, `${branch}:main`, '--force']);
-  // 建立一个不带 token 的 origin，方便以后自己推
-  try {
-    const remotes = git(['remote']);
-    if (remotes.split('\n').includes('origin')) git(['remote', 'set-url', 'origin', `${repoUrl}.git`]);
-    else git(['remote', 'add', 'origin', `${repoUrl}.git`]);
-  } catch (_) { /* 无所谓 */ }
-  console.log(`  ✓ 已推送 ${branch} → main`);
-  git(['config', 'branch.main.remote', 'origin']);
-  git(['config', 'branch.main.merge', 'refs/heads/main']);
+  if (SKIP_GIT) {
+    console.log('\n== 3. 推送代码 ==');
+    console.log('  · 已跳过（SKIP_GIT=1：代码与标签由 SSH 推送，本脚本只管 Release 与附件）');
+  } else {
+    console.log('\n== 3. 推送代码 ==');
+    git(['-c', 'credential.helper=', 'push', pushUrl, `${branch}:main`, '--force']);
+    // 建立一个不带 token 的 origin，方便以后自己推
+    try {
+      const remotes = git(['remote']);
+      if (remotes.split('\n').includes('origin')) git(['remote', 'set-url', 'origin', `${repoUrl}.git`]);
+      else git(['remote', 'add', 'origin', `${repoUrl}.git`]);
+    } catch (_) { /* 无所谓 */ }
+    console.log(`  ✓ 已推送 ${branch} → main`);
+    git(['config', 'branch.main.remote', 'origin']);
+    git(['config', 'branch.main.merge', 'refs/heads/main']);
+  }
 
   // 4) 打 tag
-  console.log('\n== 4. 打标签 ==');
-  const tags = git(['tag']).split('\n');
-  if (!tags.includes(tag)) {
-    git(['tag', '-a', tag, '-m', `Release ${tag}`]);
-    console.log(`  · 已本地创建 ${tag}`);
+  if (!SKIP_GIT) {
+    console.log('\n== 4. 打标签 ==');
+    const tags = git(['tag']).split('\n');
+    if (!tags.includes(tag)) {
+      git(['tag', '-a', tag, '-m', `Release ${tag}`]);
+      console.log(`  · 已本地创建 ${tag}`);
+    } else {
+      console.log(`  · ${tag} 已存在`);
+    }
+    git(['-c', 'credential.helper=', 'push', pushUrl, tag]);
+    console.log(`  ✓ 已推送 ${tag}`);
   } else {
-    console.log(`  · ${tag} 已存在`);
+    console.log('\n== 4. 打标签 ==');
+    console.log('  · 已跳过（SKIP_GIT=1）');
   }
-  git(['-c', 'credential.helper=', 'push', pushUrl, tag]);
-  console.log(`  ✓ 已推送 ${tag}`);
 
   if (SKIP_RELEASE) {
     console.log(`\n完成（已跳过 Release）：${repoUrl}`);

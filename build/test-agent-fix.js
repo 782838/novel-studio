@@ -55,9 +55,14 @@ check('上下文包含「作者当前打开的章节」全文', ctx.text.include
 check('上下文章节段带 read_chapter 提示', /read_chapter/.test(ctx.text));
 console.log(`  （上下文总长 ${ctx.text.length} 字符）`);
 
-// 2) AI 失败也不吞问题：故意配一个打不通的接口
-db.settings.endpoint = 'http://127.0.0.1:9/v1'; // 必然连不上
-db.settings.apiKey = 'sk-test';
+// 2) AI 失败也不吞问题：故意配一个打不通的接口（写到 providers 里，新的多模型结构下才能生效）
+let p0 = (db.settings.providers && db.settings.providers[0]) || null;
+if (!p0) {
+  p0 = { id: 'ai_test', name: '测试', provider: 'custom', endpoint: '', apiKey: '', model: 'x', temperature: 0.85, maxTokens: 4096, extraBody: '' };
+  db.settings.providers = [p0];
+}
+p0.endpoint = 'http://127.0.0.1:9/v1'; // 必然连不上
+p0.apiKey = 'sk-test';
 fs.writeFileSync(path.join(DATA, 'store.json'), JSON.stringify(db, null, 2));
 // 让正在跑的服务重新读到（store 是启动时加载的，这里直接重启服务）
 store.flush && store.flush();

@@ -36,8 +36,9 @@ export function createAgent(ctx) {
 
   function statusHtml() {
     const configured = ctx.settings.hasKey;
+    const label = ctx.settings.activeName || ctx.settings.activeModel || '已就绪';
     return `<span id="aiStatus" class="ai-status ${configured ? 'on' : 'off'}">
-      <i></i>${configured ? esc(ctx.settings.model || '已就绪') : '演示模式'}
+      <i></i>${configured ? esc(label) : '演示模式'}
     </span>`;
   }
 
@@ -380,55 +381,91 @@ export function openSettings(ctx) {
   const s = ctx.settings;
   const presetKeys = Object.keys(PRESETS);
 
+  // 工作副本：所有编辑先落到这里，保存时一次性写回
+  const working = {
+    providers: (Array.isArray(s.providers) ? s.providers : []).map((p) => ({ ...p })),
+    activeProvider: s.activeProvider || (s.providers && s.providers[0] && s.providers[0].id) || '',
+    useDemo: s.useDemo !== false,
+    agentPersona: s.agentPersona || '',
+    autoApply: !!s.autoApply
+  };
+  if (!working.providers.length) {
+    const p = blankProvider();
+    working.providers.push(p);
+    working.activeProvider = p.id;
+  }
+  let selIdx = Math.max(0, working.providers.findIndex((p) => p.id === working.activeProvider));
+
+  function blankProvider() {
+    return {
+      id: `ai_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+      name: '新的自定义 AI',
+      provider: 'custom',
+      endpoint: '', apiKey: '', model: '',
+      temperature: 0.85, maxTokens: 4096, extraBody: ''
+    };
+  }
+
   const m = openModal({
     title: '模型设置',
-    subtitle: '支持任何 OpenAI 兼容接口，数据只在本机流转',
-    width: 640,
+    subtitle: '可接入多个自定义 AI，随时切换 · 数据只在本机流转',
+    width: 760,
     html: `
       <div class="settings-wrap">
-        <label class="field">
-          <span>服务商预设</span>
-          <select id="setProvider">
-            ${presetKeys.map((k) => `<option value="${k}" ${s.provider === k ? 'selected' : ''}>${esc(PRESETS[k].label)}</option>`).join('')}
-          </select>
-          <em class="field-hint">选择后会自动填入常用地址与模型名，可再手动改</em>
-        </label>
-        <label class="field"><span>接口地址</span><input id="setEndpoint" value="${esc(s.endpoint || '')}" placeholder="https://api.deepseek.com/v1" /></label>
-        <label class="field"><span>API Key</span><input id="setKey" type="password" value="${esc(s.apiKey || '')}" placeholder="sk-..." /></label>
-        <label class="field"><span>模型名</span><input id="setModel" value="${esc(s.model || '')}" placeholder="deepseek-chat" /></label>
-        <div class="field-row">
-          <label class="field"><span>温度 <b id="tempVal">${esc(s.temperature)}</b></span>
-            <input id="setTemp" type="range" min="0" max="2" step="0.05" value="${esc(s.temperature)}" />
-          </label>
-          <label class="field"><span>最大输出</span><input id="setMax" type="number" value="${esc(s.maxTokens)}" min="256" max="131072" step="256" /></label>
+        <div class="provider-layout">
+          <div class="provider-side">
+            <div class="provider-side-head">
+              <span>已接入的模型</span>
+              <button class="btn ghost xs" id="btnAddProvider">+ 添加</button>
+            </div>
+            <div class="provider-list" id="providerList"></div>
+          </div>
+          <div class="provider-editor" id="providerEditor"></div>
         </div>
-        <label class="field"><span>高级请求参数（JSON）<em>模型特有参数走这里</em></span>
-          <textarea id="setExtra" rows="2" placeholder='{"reasoning_effort":"low"}'>${esc(s.extraBody || '')}</textarea>
-          <em class="field-hint">会原样合并进请求体。GLM-5.x 可用 <code>reasoning_effort</code> 控制思考强度（low/high/max，不传默认 max，输出会明显变长）。留空即可。</em>
-        </label>
-        <label class="field"><span>助手人格 / 写作偏好</span>
-          <textarea id="setPersona" rows="3" placeholder="例如：偏好克制冷峻的文风，讨厌巧合推动剧情，所有建议必须落到具体章节">${esc(s.agentPersona || '')}</textarea>
-          <em class="field-hint">这段会进入系统提示词，长期影响助手的判断标准</em>
-        </label>
+        <div class="settings-global">
+          <label class="field"><span>助手人格 / 写作偏好</span>
+            <textarea id="setPersona" rows="2" placeholder="例如：偏好克制冷峻的文风，讨厌巧合推动剧情，所有建议必须落到具体章节">${esc(working.agentPersona)}</textarea>
+            <em class="field-hint">这段会进入系统提示词，长期影响助手的判断标准</em>
+          </label>
+          <label class="sw-check"><input type="checkbox" id="setUseDemo" ${working.useDemo ? 'checked' : ''}/> <span>所有模型都未配置 Key 时，使用演示模式产出占位内容</span></label>
+        </div>
         <div class="settings-test">
-          <button class="btn ghost sm" id="btnTest">测试连接</button>
+          <button class="btn ghost sm" id="btnTest">测试当前编辑的模型连接</button>
           <span id="testResult" class="muted small">未测试</span>
         </div>
+        <p class="settings-foot muted">每个自定义 AI 自带接口地址、Key、模型名与推理参数，可并存多个（如「我的智谱」「公司私有模型」）。点「设为使用」切换助手当前调用的模型，保存后立即生效。</p>
       </div>`,
     buttons: [
       { label: '取消', kind: 'ghost' },
       {
         label: '保存', kind: 'primary', keepOpen: true,
         onClick: async (body, wrap) => {
+          // 保存前清洗：丢掉「只有名字、接口/Key/模型名全空」的草稿，
+          // 否则列表里会堆一串空条目，看起来就像"配置被清空了"
+          const isBlank = (p) => !String(p.endpoint || '').trim()
+            && !String(p.apiKey || '').trim() && !String(p.model || '').trim();
+          let list = working.providers.filter((p) => !isBlank(p));
+          if (!list.length) list = [{ ...(working.providers[0] || blankProvider()) }];
+          // 正在使用的模型：必须指向真实存在的条目，否则退回「接口+Key 都有的」那个，再退回第一个。
+          // 关键：绝不能因为新增了一个空模型，就把原来能用的模型顶掉。
+          let active = list.some((p) => p.id === working.activeProvider) ? working.activeProvider : '';
+          const cur = list.find((p) => p.id === active);
+          if (!cur || !cur.apiKey || !cur.endpoint) {
+            const usable = list.find((p) => p.apiKey && p.endpoint);
+            active = usable ? usable.id : (cur ? cur.id : list[0].id);
+          }
+          working.providers = list;
+          working.activeProvider = active;
           await api.saveSettings({
-            provider: body.querySelector('#setProvider').value,
-            endpoint: body.querySelector('#setEndpoint').value,
-            apiKey: body.querySelector('#setKey').value,
-            model: body.querySelector('#setModel').value,
-            temperature: Number(body.querySelector('#setTemp').value),
-            maxTokens: Number(body.querySelector('#setMax').value),
+            providers: list.map((p) => ({
+              id: p.id, name: p.name, provider: p.provider, endpoint: p.endpoint,
+              apiKey: p.apiKey, model: p.model,
+              temperature: Number(p.temperature), maxTokens: Number(p.maxTokens), extraBody: p.extraBody
+            })),
+            activeProvider: active,
+            useDemo: working.useDemo,
             agentPersona: body.querySelector('#setPersona').value,
-            extraBody: body.querySelector('#setExtra') ? body.querySelector('#setExtra').value : ''
+            autoApply: working.autoApply
           });
           await ctx.refreshSettings();
           wrap.classList.remove('in');
@@ -438,31 +475,125 @@ export function openSettings(ctx) {
       }
     ],
     onMount: (body) => {
-      body.querySelector('#setProvider').addEventListener('change', (e) => {
-        const p = PRESETS[e.target.value];
-        if (!p || !p.endpoint) return;
-        body.querySelector('#setEndpoint').value = p.endpoint;
-        body.querySelector('#setModel').value = p.model;
+      const listEl = body.querySelector('#providerList');
+      const editorEl = body.querySelector('#providerEditor');
+
+      const renderList = () => {
+        if (!working.providers.length) {
+          listEl.innerHTML = '<div class="prov-empty muted small">还没有模型，点「+ 添加」</div>';
+        } else {
+          listEl.innerHTML = working.providers.map((p, i) => {
+            const ready = Boolean(p.apiKey && p.endpoint);
+            return `
+            <div class="prov-card ${i === selIdx ? 'sel' : ''} ${working.activeProvider === p.id ? 'active' : ''} ${ready ? '' : 'unset'}" data-i="${i}">
+              <div class="prov-main">
+                <b>${esc(p.name || '未命名')}${ready ? '' : ' <i class="prov-tag">待填写</i>'}</b>
+                <span class="prov-sub">${ready ? esc(p.model || p.endpoint) : '接口地址 / Key 还没填'}</span>
+              </div>
+              <div class="prov-acts">
+                <button class="mini ${working.activeProvider === p.id ? 'on' : ''}" data-act="activate" data-i="${i}">${working.activeProvider === p.id ? '● 使用中' : '设为使用'}</button>
+                <button class="mini danger" data-act="del" data-i="${i}" title="删除该模型">✕</button>
+              </div>
+            </div>`;
+          }).join('');
+        }
+        listEl.querySelectorAll('[data-act]').forEach((btn) => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const i = Number(btn.dataset.i);
+            const act = btn.dataset.act;
+            if (act === 'activate') {
+              working.activeProvider = working.providers[i].id;
+              selIdx = i;
+              renderList(); renderEditor();
+            } else if (act === 'del') {
+              const removedId = working.providers[i].id;
+              working.providers.splice(i, 1);
+              if (!working.providers.length) {
+                const np = blankProvider();
+                working.providers.push(np);
+                working.activeProvider = np.id;
+              } else if (working.activeProvider === removedId) {
+                working.activeProvider = (working.providers.find((p) => p.apiKey && p.endpoint) || working.providers[0]).id;
+              }
+              selIdx = Math.min(i, working.providers.length - 1);
+              renderList(); renderEditor();
+            }
+          });
+        });
+        listEl.querySelectorAll('.prov-card').forEach((card) => {
+          card.addEventListener('click', () => { selIdx = Number(card.dataset.i); renderList(); renderEditor(); });
+        });
+      };
+
+      const renderEditor = () => {
+        const p = working.providers[selIdx];
+        if (!p) { editorEl.innerHTML = ''; return; }
+        editorEl.innerHTML = `
+          <label class="field"><span>名称</span><input id="peName" value="${esc(p.name || '')}" placeholder="例如：我的智谱 / 公司私有模型" /></label>
+          <label class="field"><span>服务商预设</span>
+            <select id="peProvider">
+              ${presetKeys.map((k) => `<option value="${k}" ${p.provider === k ? 'selected' : ''}>${esc(PRESETS[k].label)}</option>`).join('')}
+            </select>
+            <em class="field-hint">选择后会自动填入常用地址与模型名，可再手动改</em>
+          </label>
+          <label class="field"><span>接口地址</span><input id="peEndpoint" value="${esc(p.endpoint || '')}" placeholder="https://api.deepseek.com/v1" /></label>
+          <label class="field"><span>API Key</span><input id="peKey" type="password" value="${esc(p.apiKey || '')}" placeholder="sk-..." /></label>
+          <label class="field"><span>模型名</span><input id="peModel" value="${esc(p.model || '')}" placeholder="deepseek-chat" /></label>
+          <div class="field-row">
+            <label class="field"><span>温度 <b id="peTempVal">${esc(p.temperature)}</b></span>
+              <input id="peTemp" type="range" min="0" max="2" step="0.05" value="${esc(p.temperature)}" />
+            </label>
+            <label class="field"><span>最大输出</span><input id="peMax" type="number" value="${esc(p.maxTokens)}" min="256" max="131072" step="256" /></label>
+          </div>
+          <label class="field"><span>高级请求参数（JSON）<em>模型特有参数走这里</em></span>
+            <textarea id="peExtra" rows="2" placeholder='{"reasoning_effort":"low"}'>${esc(p.extraBody || '')}</textarea>
+            <em class="field-hint">会原样合并进请求体。GLM-5.x 可用 <code>reasoning_effort</code> 控制思考强度（low/high/max）。留空即可。</em>
+          </label>`;
+
+        const bind = (sel, key, asNum) => {
+          const el = editorEl.querySelector(sel);
+          if (!el) return;
+          el.addEventListener('input', () => { p[key] = asNum ? Number(el.value) : el.value; });
+        };
+        bind('#peName', 'name');
+        bind('#peEndpoint', 'endpoint');
+        bind('#peKey', 'apiKey');
+        bind('#peModel', 'model');
+        bind('#peExtra', 'extraBody');
+        editorEl.querySelector('#peProvider').addEventListener('change', (e) => {
+          const pr = PRESETS[e.target.value];
+          p.provider = e.target.value;
+          if (pr && pr.endpoint) { p.endpoint = pr.endpoint; p.model = pr.model; editorEl.querySelector('#peEndpoint').value = pr.endpoint; editorEl.querySelector('#peModel').value = pr.model; }
+        });
+        editorEl.querySelector('#peTemp').addEventListener('input', (e) => {
+          p.temperature = Number(e.target.value);
+          editorEl.querySelector('#peTempVal').textContent = e.target.value;
+        });
+        editorEl.querySelector('#peMax').addEventListener('input', (e) => { p.maxTokens = Number(e.target.value); });
+      };
+
+      body.querySelector('#btnAddProvider').addEventListener('click', () => {
+        const np = blankProvider();
+        working.providers.push(np);
+        selIdx = working.providers.length - 1; // 编辑区切到新草稿，方便马上填
+        // 刻意不动 working.activeProvider：新增一个还没填的模型，不能把正在用的模型顶掉，
+        // 否则用户会以为"加了第二个，第一个被清空了"。
+        renderList(); renderEditor();
       });
-      body.querySelector('#setTemp').addEventListener('input', (e) => {
-        body.querySelector('#tempVal').textContent = e.target.value;
-      });
+      body.querySelector('#setPersona').addEventListener('input', (e) => { working.agentPersona = e.target.value; });
+      body.querySelector('#setUseDemo').addEventListener('change', (e) => { working.useDemo = e.target.checked; });
+
       body.querySelector('#btnTest').addEventListener('click', async () => {
+        const p = working.providers[selIdx];
         const out = body.querySelector('#testResult');
         out.textContent = '正在连接…';
-        // 测试前先落盘当前填写的值
-        await api.saveSettings({
-          provider: body.querySelector('#setProvider').value,
-          endpoint: body.querySelector('#setEndpoint').value,
-          apiKey: body.querySelector('#setKey').value,
-          model: body.querySelector('#setModel').value,
-          temperature: Number(body.querySelector('#setTemp').value),
-          maxTokens: Number(body.querySelector('#setMax').value),
-          agentPersona: body.querySelector('#setPersona').value,
-            extraBody: body.querySelector('#setExtra') ? body.querySelector('#setExtra').value : ''
-        });
         try {
-          const r = await api.aiTest();
+          const r = await api.aiTest({
+            id: p.id, name: p.name, provider: p.provider, endpoint: p.endpoint,
+            apiKey: p.apiKey, model: p.model, temperature: Number(p.temperature),
+            maxTokens: Number(p.maxTokens), extraBody: p.extraBody
+          });
           out.innerHTML = r.ok
             ? `<span class="success-text">✓ 连通（${esc(r.model)} · ${r.latency}ms）</span>`
             : `<span class="error-text">✕ ${esc(r.message || '连接失败')}</span>`;
@@ -470,6 +601,9 @@ export function openSettings(ctx) {
           out.innerHTML = `<span class="error-text">✕ ${esc(err.message)}</span>`;
         }
       });
+
+      renderList();
+      renderEditor();
     }
   });
   return m;

@@ -33,14 +33,26 @@ function parseExtraBody(raw) {
 
 function settings() { return store.load().settings; }
 
-function llmEnabled() {
+/**
+ * 取「当前正在使用的那个自定义 AI」配置。
+ * 优先级：activeProvider 指定的 → 第一个同时有 key 和 endpoint 的 → 列表里第一个（可能为 null）。
+ */
+function activeConfig() {
   const s = settings();
-  return Boolean(s.apiKey && s.endpoint);
+  const list = Array.isArray(s.providers) ? s.providers : [];
+  const byId = s.activeProvider ? list.find((p) => p.id === s.activeProvider) : null;
+  const withKey = list.find((p) => p.apiKey && p.endpoint);
+  return byId || withKey || list[0] || null;
 }
 
-function endpointUrl() {
-  const s = settings();
-  let base = String(s.endpoint || '').trim().replace(/\/+$/, '');
+function llmEnabled() {
+  const c = activeConfig();
+  return Boolean(c && c.apiKey && c.endpoint);
+}
+
+function endpointUrl(cfg) {
+  const c = cfg || activeConfig() || {};
+  let base = String(c.endpoint || '').trim().replace(/\/+$/, '');
   if (!base) throw new Error('尚未配置模型接口地址');
   if (!/^https?:\/\//i.test(base)) base = `http://${base}`;
   if (/\/chat\/completions$/i.test(base)) return base;
@@ -48,16 +60,17 @@ function endpointUrl() {
   return `${base}/chat/completions`;
 }
 
-async function callChat({ messages, tools, temperature, maxTokens }) {
-  const s = settings();
+async function callChat({ messages, tools, temperature, maxTokens, cfg }) {
+  const c = cfg || activeConfig();
+  if (!c) throw new Error('尚未配置任何模型，请到「设置 → 模型」添加一个自定义 AI');
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
   try {
     const body = {
-      model: s.model,
+      model: c.model,
       messages,
-      temperature: temperature ?? s.temperature ?? 0.85,
-      max_tokens: maxTokens ?? s.maxTokens ?? 4096,
+      temperature: temperature ?? c.temperature ?? 0.85,
+      max_tokens: maxTokens ?? c.maxTokens ?? 4096,
       stream: false
     };
     if (tools && tools.length) {
@@ -65,13 +78,13 @@ async function callChat({ messages, tools, temperature, maxTokens }) {
       body.tool_choice = 'auto';
     }
     // 合并用户自定义的高级参数（例如 GLM 的 reasoning_effort）
-    const extra = parseExtraBody(s.extraBody);
+    const extra = parseExtraBody(c.extraBody);
     Object.assign(body, extra);
-    const res = await fetch(endpointUrl(), {
+    const res = await fetch(endpointUrl(c), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${s.apiKey}`
+        Authorization: `Bearer ${c.apiKey}`
       },
       body: JSON.stringify(body),
       signal: ctrl.signal
@@ -88,23 +101,33 @@ async function callChat({ messages, tools, temperature, maxTokens }) {
   }
 }
 
-async function testConnection() {
-  if (!llmEnabled()) return { ok: false, message: '未配置 API Key', configured: false };
+/**
+ * 连通性测试。不传 override 时测「当前使用的模型」；传了就测那个（用于设置弹窗里测试尚未启用的配置）。
+ * 内部吞掉异常，始终返回一个结果对象，方便前端直接展示。
+ */
+async function testConnection(override) {
+  const c = override || activeConfig();
+  if (!c || !c.apiKey || !c.endpoint) return { ok: false, message: '未配置 API Key 或接口地址', configured: false };
   const t0 = Date.now();
-  const json = await callChat({
-    messages: [
-      { role: 'system', content: 'You are a connectivity probe.' },
-      { role: 'user', content: '回复两个字：正常' }
-    ],
-    maxTokens: 16
-  });
-  return {
-    ok: true,
-    configured: true,
-    model: settings().model,
-    reply: json?.choices?.[0]?.message?.content || '',
-    latency: Date.now() - t0
-  };
+  try {
+    const json = await callChat({
+      messages: [
+        { role: 'system', content: 'You are a connectivity probe.' },
+        { role: 'user', content: '回复两个字：正常' }
+      ],
+      maxTokens: 16,
+      cfg: c
+    });
+    return {
+      ok: true,
+      configured: true,
+      model: c.model,
+      reply: json?.choices?.[0]?.message?.content || '',
+      latency: Date.now() - t0
+    };
+  } catch (err) {
+    return { ok: false, configured: true, message: err.message, latency: Date.now() - t0 };
+  }
 }
 
 /**
@@ -112,8 +135,9 @@ async function testConnection() {
  * onDelta 会收到 { type: 'thinking' | 'content' | 'tool', text } ——thinking 即模型的思考过程。
  * 兼容三种情况：标准 SSE、个别接口不支持 stream 时直接返回 JSON、以及中途被 abort。
  */
-async function callChatStream({ messages, tools, temperature, maxTokens, onDelta, signal }) {
-  const s = settings();
+async function callChatStream({ messages, tools, temperature, maxTokens, onDelta, signal, cfg }) {
+  const c = cfg || activeConfig();
+  if (!c) throw new Error('尚未配置任何模型，请到「设置 → 模型」添加一个自定义 AI');
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
   const relay = () => ctrl.abort();
@@ -124,21 +148,21 @@ async function callChatStream({ messages, tools, temperature, maxTokens, onDelta
   }
   try {
     const body = {
-      model: s.model,
+      model: c.model,
       messages,
-      temperature: temperature ?? s.temperature ?? 0.85,
-      max_tokens: maxTokens ?? s.maxTokens ?? 4096,
+      temperature: temperature ?? c.temperature ?? 0.85,
+      max_tokens: maxTokens ?? c.maxTokens ?? 4096,
       stream: true
     };
     if (tools && tools.length) {
       body.tools = tools;
       body.tool_choice = 'auto';
     }
-    Object.assign(body, parseExtraBody(s.extraBody));
+    Object.assign(body, parseExtraBody(c.extraBody));
 
-    const res = await fetch(endpointUrl(), {
+    const res = await fetch(endpointUrl(c), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.apiKey}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },
       body: JSON.stringify(body),
       signal: ctrl.signal
     });

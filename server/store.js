@@ -11,18 +11,72 @@ const ROOT = path.join(__dirname, '..');
 const DATA_DIR = process.env.NOVEL_DATA_DIR || path.join(ROOT, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'store.json');
 
+// 新版：支持接入多个自定义 AI（providers 列表），activeProvider 记录当前在用哪一个。
+// 每个 provider 自带 endpoint / apiKey / model / temperature / maxTokens / extraBody，
+// 这样不同的私有模型、不同的推理强度都能并存、随时切换。
 const DEFAULT_SETTINGS = {
-  provider: 'deepseek',
-  endpoint: 'https://api.deepseek.com/v1',
-  apiKey: '',
-  model: 'deepseek-chat',
-  temperature: 0.85,
-  maxTokens: 4096,
+  providers: [],
+  activeProvider: null,
   useDemo: true, // 未配置 key 时自动用演示模式产出，保证功能可体验
   agentPersona: '',
-  extraBody: '', // 高级请求参数（JSON 字符串），用于传模型特有字段如 reasoning_effort
   autoApply: false
 };
+
+/** 把任意来源的对象规整成一个合法的 provider 条目（缺字段补默认、类型校正、去空白） */
+function clampN(v, min, max, dflt) {
+  const n = Number(v);
+  if (!isFinite(n)) return dflt;
+  return Math.min(max, Math.max(min, n));
+}
+function normalizeProvider(p) {
+  p = p || {};
+  return {
+    id: (typeof p.id === 'string' && p.id) ? p.id : uid('ai'),
+    name: String(p.name || '').trim().slice(0, 40) || '自定义模型',
+    provider: String(p.provider || 'custom'),
+    endpoint: String(p.endpoint || '').trim(),
+    apiKey: String(p.apiKey || '').trim(),
+    model: String(p.model || '').trim(),
+    temperature: clampN(p.temperature, 0, 2, 0.85),
+    maxTokens: clampN(p.maxTokens, 256, 131072, 4096),
+    extraBody: String(p.extraBody || '').trim()
+  };
+}
+
+/**
+ * 旧版单配置（顶层 endpoint / apiKey / model）迁移成 providers 列表的第一项；
+ * 同时保证 activeProvider 指向一个有效条目。调用方传入的是已 merged 的 settings 对象（原地修改）。
+ */
+function migrateSettings(s) {
+  if (!Array.isArray(s.providers)) s.providers = [];
+  if (s.providers.length === 0 && (s.endpoint || s.apiKey || s.model)) {
+    s.providers.push(normalizeProvider({
+      name: '默认模型',
+      provider: s.provider || 'custom',
+      endpoint: s.endpoint || '',
+      apiKey: s.apiKey || '',
+      model: s.model || '',
+      temperature: s.temperature,
+      maxTokens: s.maxTokens,
+      extraBody: s.extraBody || ''
+    }));
+  }
+  const list = s.providers;
+  // 清掉"只有名字、接口/Key/模型名全空"的草稿条目（至少保留一条）。
+  // 这类空条目曾经因为"新增模型即置为使用"被写进 store.json，看起来像已有配置被清空。
+  const isBlank = (p) => !String(p.endpoint || '').trim()
+    && !String(p.apiKey || '').trim() && !String(p.model || '').trim();
+  const kept = list.filter((p) => !isBlank(p));
+  if (kept.length && kept.length !== list.length) s.providers = kept;
+  const has = (id) => s.providers.some((p) => p.id === id);
+  s.activeProvider = has(s.activeProvider)
+    ? s.activeProvider
+    : (s.providers.find((p) => p.apiKey && p.endpoint) || s.providers[0] || {}).id || null;
+  // 清掉迁移前的顶层遗留字段，避免与新结构混淆
+  delete s.provider; delete s.endpoint; delete s.apiKey; delete s.model;
+  delete s.temperature; delete s.maxTokens; delete s.extraBody;
+  return s;
+}
 
 /** 所有集合名 */
 const COLLECTIONS = [
@@ -55,6 +109,7 @@ function load() {
       const parsed = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
       state = { ...blank(), ...parsed };
       state.settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) };
+      migrateSettings(state.settings);
       COLLECTIONS.forEach((c) => { if (!Array.isArray(state[c])) state[c] = []; });
     } catch (err) {
       const bak = `${DATA_FILE}.broken-${Date.now()}`;
@@ -165,6 +220,7 @@ function bundle(projectId) {
 
 module.exports = {
   DATA_DIR, ROOT, COLLECTIONS, DEFAULT_SETTINGS,
+  normalizeProvider, migrateSettings,
   load, flush, save, uid,
   all, find, where, byProject, insert, update, remove, removeWhere, nextOrder,
   getProject, deleteProject, bundle

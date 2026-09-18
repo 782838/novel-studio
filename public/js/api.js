@@ -46,7 +46,7 @@ export default {
   patchItem: (coll, id, body) => patch(`/api/${coll}/${id}`, body),
   removeItem: (coll, id) => del(`/api/${coll}/${id}`),
 
-  aiTest: () => post('/api/ai/test'),
+  aiTest: (cfg) => post('/api/ai/test', cfg ? { config: cfg } : {}),
   aiChat: (projectId, message, chapterId) => post('/api/ai/chat', { projectId, message, chapterId }),
   /**
    * 流式对话：onEvent 会陆续收到 start/round/thinking/answer/op/done/stopped/error。

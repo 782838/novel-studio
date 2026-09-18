@@ -84,15 +84,22 @@ const putJSON = (url, body) => fetch(BASE + url, {
 (async () => {
   await new Promise((r) => fake.listen(FAKE_PORT, r));
   // 把测试实例的模型指向假服务（这样「停止」才有可停止的流）
+  // 注意：设置已升级成 providers 列表，必须按新结构写，否则这一项配置不会生效
   const s = await putJSON('/api/settings', {
-    provider: 'custom',
-    endpoint: `http://127.0.0.1:${FAKE_PORT}/v1`,
-    apiKey: 'sk-fake',
-    model: 'fake-e2e',
-    temperature: 0.7,
-    maxTokens: 1024
+    providers: [{
+      id: 'ai_e2e_fake',
+      name: 'e2e 假模型',
+      provider: 'custom',
+      endpoint: `http://127.0.0.1:${FAKE_PORT}/v1`,
+      apiKey: 'sk-fake',
+      model: 'fake-e2e',
+      temperature: 0.7,
+      maxTokens: 1024,
+      extraBody: ''
+    }],
+    activeProvider: 'ai_e2e_fake'
   });
-  console.log(`[环境] 测试实例 ${BASE}，假模型 http://127.0.0.1:${FAKE_PORT}/v1，模型=${s.model}`);
+  console.log(`[环境] 测试实例 ${BASE}，假模型 http://127.0.0.1:${FAKE_PORT}/v1，模型=${s.activeModel}`);
 
   const win = new BrowserWindow({ show: false, width: 1500, height: 950 });
   await win.loadURL(BASE);

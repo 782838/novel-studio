@@ -115,7 +115,8 @@ const ctx = {
     // 顶栏徽章只在启动时设置过一次，中途保存 Key 会一直显示"演示模式"——这里同步刷新
     const chip = document.getElementById('statusChip');
     if (chip) {
-      chip.textContent = state.settings.hasKey ? `模型 ${state.settings.model}` : '演示模式';
+      const label = state.settings.activeName || state.settings.activeModel;
+      chip.textContent = state.settings.hasKey ? `模型 ${label || ''}` : '演示模式';
       chip.className = `status-chip ${state.settings.hasKey ? 'on' : 'off'}`;
     }
     agent.paint();
@@ -728,7 +729,8 @@ async function boot() {
 
   const statusChip = document.getElementById('statusChip');
   statusChip.addEventListener('click', () => toggleAgent());
-  statusChip.textContent = state.settings.hasKey ? `模型 ${state.settings.model}` : '演示模式';
+  const statusLabel = state.settings.activeName || state.settings.activeModel;
+  statusChip.textContent = state.settings.hasKey ? `模型 ${statusLabel || ''}` : '演示模式';
   statusChip.className = `status-chip ${state.settings.hasKey ? 'on' : 'off'}`;
 
   if (localStorage.getItem(LS_AGENT) !== '0') toggleAgent(true);

@@ -168,23 +168,48 @@ on('GET', '/api/meta', async ({ res }) => {
 
 on('GET', '/api/settings', async ({ res }) => {
   const s = store.load().settings;
-  ok(res, { ...s, hasKey: Boolean(s.apiKey) });
+  const list = Array.isArray(s.providers) ? s.providers : [];
+  const active = (s.activeProvider && list.find((p) => p.id === s.activeProvider))
+    || list.find((p) => p.apiKey && p.endpoint) || list[0] || null;
+  ok(res, {
+    ...s,
+    hasKey: Boolean(active && active.apiKey && active.endpoint),
+    activeModel: active ? active.model : null,
+    activeName: active ? active.name : null,
+    providerCount: list.length
+  });
 });
 
 on('PUT', '/api/settings', async ({ res, body }) => {
   const db = store.load();
-  const allow = ['provider', 'endpoint', 'apiKey', 'model', 'temperature', 'maxTokens', 'useDemo', 'agentPersona', 'autoApply', 'extraBody'];
-  allow.forEach((k) => {
-    if (body[k] !== undefined) {
-      let v = body[k];
-      if (k === 'temperature' || k === 'maxTokens') v = Number(v);
-      if (k === 'temperature') v = Math.min(2, Math.max(0, v));
-      if (k === 'maxTokens') v = Math.min(131072, Math.max(256, v));
-      db.settings[k] = typeof v === 'string' ? v.trim() : v;
-    }
-  });
+  // 多个自定义 AI：整表替换并规范化，去重 id
+  if (Array.isArray(body.providers)) {
+    const seen = new Set();
+    db.settings.providers = body.providers
+      .map((p) => store.normalizeProvider(p))
+      .filter((p) => { if (seen.has(p.id)) return false; seen.add(p.id); return true; });
+  }
+  // 选中的模型：确保指向列表里真实存在的条目，否则退而求其次选有 key 的或第一个
+  if (body.activeProvider !== undefined) {
+    const list = db.settings.providers;
+    db.settings.activeProvider = (list.length && list.some((p) => p.id === body.activeProvider))
+      ? body.activeProvider
+      : (list.find((p) => p.apiKey && p.endpoint) || list[0] || {}).id || null;
+  }
+  if (body.useDemo !== undefined) db.settings.useDemo = !!body.useDemo;
+  if (body.agentPersona !== undefined) db.settings.agentPersona = String(body.agentPersona || '').trim();
+  if (body.autoApply !== undefined) db.settings.autoApply = !!body.autoApply;
   store.save();
-  ok(res, { ...db.settings, hasKey: Boolean(db.settings.apiKey) });
+  const list = db.settings.providers;
+  const active = (db.settings.activeProvider && list.find((p) => p.id === db.settings.activeProvider))
+    || list.find((p) => p.apiKey && p.endpoint) || list[0] || null;
+  ok(res, {
+    ...db.settings,
+    hasKey: Boolean(active && active.apiKey && active.endpoint),
+    activeModel: active ? active.model : null,
+    activeName: active ? active.name : null,
+    providerCount: list.length
+  });
 });
 
 // --- 项目
@@ -737,8 +762,8 @@ on('DELETE', '/api/projects/:id/messages', async ({ res, params }) => {
 
 // --- AI
 
-on('POST', '/api/ai/test', async ({ res }) => {
-  try { ok(res, await ai.testConnection()); }
+on('POST', '/api/ai/test', async ({ res, body }) => {
+  try { ok(res, await ai.testConnection(body && body.config ? body.config : undefined)); }
   catch (err) { ok(res, { ok: false, configured: true, message: err.message }); }
 });
 
@@ -1032,12 +1057,14 @@ server.listen(PORT, () => {
   const db = store.load();
   const actualPort = server.address().port;
   const instance = path.basename(store.DATA_DIR);
+  const active = (db.settings.activeProvider && db.settings.providers.find((p) => p.id === db.settings.activeProvider))
+    || db.settings.providers.find((p) => p.apiKey && p.endpoint) || db.settings.providers[0] || null;
   console.log('');
   console.log('  小说创作工作台已启动');
   console.log(`      地址：http://localhost:${actualPort}`);
   console.log(`      实例：${instance}　（${store.DATA_DIR}）`);
   console.log(`      作品数：${db.projects.length}`);
-  console.log(`      模型：${ai.llmEnabled() ? `${db.settings.model}（${db.settings.endpoint}）` : '未配置，当前为演示模式'}`);
+  console.log(`      模型：${ai.llmEnabled() ? `${active.model || '已配置'}（${active.endpoint || ''}）· 共 ${(db.settings.providers || []).length} 个接入` : '未配置，当前为演示模式'}`);
   console.log('');
   console.log('      按 Ctrl + C 停止服务');
   console.log('');

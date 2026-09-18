@@ -150,14 +150,22 @@ const readStore = () => JSON.parse(fs.readFileSync(path.join(DATA, 'store.json')
       ? JSON.parse(fs.readFileSync(file, 'utf8'))
       : { projects: [], settings: {} };
     db.settings = db.settings || {};
-    Object.assign(db.settings, {
+    // 设置已升级成 providers 列表：整表替换成唯一的假模型，并把它设为当前使用，
+    // 这样即使拷来的是用户真实 store.json（里面已有 providers）也能覆盖成功。
+    db.settings.providers = [{
+      id: 'ai_test_fake',
+      name: '流式测试假模型',
       provider: 'custom',
       endpoint: `http://127.0.0.1:${FAKE_PORT}/v1`,
       apiKey: 'sk-fake',
       model: 'fake-stream',
       temperature: 0.7,
-      maxTokens: 1024
-    });
+      maxTokens: 1024,
+      extraBody: ''
+    }];
+    db.settings.activeProvider = 'ai_test_fake';
+    delete db.settings.provider; delete db.settings.endpoint; delete db.settings.apiKey;
+    delete db.settings.model; delete db.settings.temperature; delete db.settings.maxTokens;
     if (!db.projects.length) {
       db.projects.push({ id: 'p_test', title: '流式测试作品', createdAt: Date.now() });
       db.notes = [{ id: 'n_test', projectId: 'p_test', title: '原备忘', content: '内容', category: '备忘', pinned: false, order: 1 }];

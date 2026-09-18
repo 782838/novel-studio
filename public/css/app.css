@@ -673,18 +673,28 @@ body.writing-full .editor-content {
 .is-done { opacity: .62; border-left-style: dashed !important; }
 .lane.is-done { border-left-color: var(--muted) !important; }
 
-/* 笔记头部：置顶 / 已完成 按钮并排 */
+/* 笔记头部：置顶 / 已完成 按钮并排。默认常显、带文字，避免"只有图标、看不见按钮" */
 .note-head-acts { display: flex; gap: 4px; }
-.note-head-acts .icon-btn { font-size: 13px; padding: 2px 4px; border-radius: 5px; opacity: .5; background: transparent; border: none; cursor: pointer; line-height: 1; }
-.note-head-acts .icon-btn:hover { opacity: 1; background: var(--surface-2); }
-.note-head-acts .icon-btn.pinned, .note-head-acts .icon-btn.on { opacity: 1; }
+.note-head-acts .icon-btn {
+  font-size: 11.5px; padding: 3px 7px; border-radius: 5px; opacity: 1; line-height: 1.3;
+  background: var(--surface-2); border: 1px solid var(--border); cursor: pointer; color: var(--muted);
+  white-space: nowrap; transition: color .15s, border-color .15s, background .15s;
+}
+.note-head-acts .icon-btn:hover { color: var(--accent); border-color: var(--accent); }
+.note-head-acts .icon-btn.pinned { color: #b8860b; border-color: rgba(224,165,46,.55); background: rgba(224,165,46,.12); }
+.note-head-acts .icon-btn.on { color: var(--green); border-color: rgba(43,160,90,.55); background: rgba(43,160,90,.12); }
 
-/* 角色卡：置顶 / 已完成 按钮容器（替代原来绝对定位的单独置顶按钮） */
-.char-card-btns { position: absolute; top: 8px; right: 8px; z-index: 2; display: flex; gap: 2px; }
-.char-card-btns .pin-btn, .char-card-btns .done-btn { position: static; opacity: .45; padding: 4px; border-radius: 6px; border: none; background: transparent; cursor: pointer; font-size: 14px; line-height: 1; }
-.char-card-btns .pin-btn:hover, .char-card-btns .done-btn:hover { opacity: 1; background: var(--surface-2); }
-.char-card-btns .pin-btn.on { opacity: 1; filter: drop-shadow(0 0 2px rgba(224,165,46,.7)); }
-.char-card-btns .done-btn.on { opacity: 1; filter: drop-shadow(0 0 2px rgba(43,160,90,.6)); }
+/* 角色卡：置顶 / 已完成 按钮单独一行（原来绝对定位在右上角，图标太小看不见；带文字后会压到标题，
+   所以改为卡片内正常流式的一行，常显、带文字，一眼能看出是可点的按钮） */
+.char-card-btns { display: flex; gap: 6px; margin: 0 0 10px; }
+.char-card-btns .pin-btn, .char-card-btns .done-btn {
+  position: static; opacity: 1; padding: 3px 8px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  font-size: 11.5px; line-height: 1.3; white-space: nowrap; transition: color .15s, border-color .15s, background .15s;
+}
+.char-card-btns .pin-btn:hover, .char-card-btns .done-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--surface-2); }
+.char-card-btns .pin-btn.on { color: #b8860b; border-color: rgba(224,165,46,.55); background: rgba(224,165,46,.12); }
+.char-card-btns .done-btn.on { color: var(--green); border-color: rgba(43,160,90,.55); background: rgba(43,160,90,.12); }
 
 /* 线路：已完成 按钮激活态 */
 .lane-done { color: var(--green) !important; border-color: rgba(43,160,90,.5) !important; }
@@ -709,6 +719,7 @@ body.writing-full .editor-content {
 .td-acts { display: flex; gap: 10px; }
 .td-acts button { border: none; background: transparent; color: var(--muted); font-size: 11.5px; padding: 0; }
 .td-acts button:hover { color: var(--accent); }
+.td-acts button.pinned { color: #b8860b; }
 
 /* ---------------------------------------------------------- 弹窗 / 表单 */
 
@@ -1006,6 +1017,30 @@ body.agent-open .agent-panel { width: 396px; flex-basis: 396px; border-left-colo
 }
 .dot-typing.sm i { width: 4px; height: 4px; }
 .bubble-meta { margin-top: 6px; font-size: 11px; color: var(--muted); }
+
+/* --- AI 任务卡：生成记忆点 / 续写 / 生成大纲·角色·线路·设定·脑暴 ——
+       这类"其它 AI 功能"不再弹独立浮层，而是以任务卡并入助手对话流，
+       过程可见、可停止，末尾汇报执行了多少项 --- */
+.bubble.task .bubble-body { max-width: 100%; }
+.task-head { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; font-size: 13px; }
+.task-head b { font-weight: 600; }
+.task-ico { font-size: 14px; line-height: 1; }
+.task-bar {
+  height: 6px; border-radius: 4px; margin: 2px 0 6px;
+  background: var(--surface-3); border: 1px solid var(--border); overflow: hidden;
+}
+.task-bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #4f46e5, #7c3aed); transition: width .25s ease; }
+.task-prog { font-size: 11.5px; color: var(--muted); margin-bottom: 5px; }
+.task-prog b { color: var(--text); }
+.task-foot {
+  display: flex; align-items: center; gap: 8px; margin-top: 8px; padding-top: 6px;
+  border-top: 1px dashed var(--border); font-size: 11.5px;
+}
+.task-foot .task-wait, .task-foot .task-secs { margin-left: auto; color: var(--muted); font-size: 11px; }
+.task-foot .task-wait b { color: var(--text); }
+.task-foot.ok { color: #2f6b4f; }
+.task-foot.stopped { color: #8a6d3b; }
+.task-foot.err { color: #a33; }
 
 /* --- 大纲树就地改名 --- */
 .rename-input {

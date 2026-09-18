@@ -1,6 +1,6 @@
 'use strict';
 import api from './api.js';
-import { esc, md, openForm, openModal, openConfirm, closeModal, toast, debounce, downloadText, stripBom, openAiWaiting } from './ui.js';
+import { esc, md, openForm, openModal, openConfirm, closeModal, toast, debounce, downloadText, stripBom } from './ui.js';
 import { parseImport } from './importer.js';
 
 const TYPE_ORDER = { act: 0, chapter: 1, scene: 2, beat: 3 };
@@ -223,24 +223,19 @@ export function outline(ctx) {
           ],
           okText: '生成',
           onSubmit: async (v) => {
-            const { close, signal } = openAiWaiting({ title: 'AI 正在生成大纲…' });
-            try {
-              const res = await api.aiGenerate(c.projectId, 'outline', {
+            await runGenTask(c, {
+              title: 'AI 正在生成大纲…', icon: '🗂', kind: 'outline',
+              params: {
                 parentId: parent ? parent.id : null,
                 count: Number(v.count),
                 guidance: v.guidance
-              }, { signal });
-              aiApplyList(c, res, {
-                title: '生成的大纲节点',
-                render: (it) => `<b>${esc(it.title)}</b><span class="gen-type">${esc(c.meta.typeLabel[it.type] || it.type)}</span><p>${esc(it.summary || '')}</p>`,
-                apply: async (it) => {
-                  await c.create('outline', { ...it, parentId: parent ? parent.id : null });
-                }
-              });
-            } catch (e) {
-              if (!signal.aborted) toast(e.message || '生成失败', 'error');
-              return false;
-            } finally { close(); }
+              },
+              applyTitle: '生成的大纲节点',
+              render: (it) => `<b>${esc(it.title)}</b><span class="gen-type">${esc(c.meta.typeLabel[it.type] || it.type)}</span><p>${esc(it.summary || '')}</p>`,
+              apply: async (it) => {
+                await c.create('outline', { ...it, parentId: parent ? parent.id : null });
+              }
+            });
           }
         });
       });
@@ -575,18 +570,14 @@ export function characters(ctx) {
           ],
           okText: '生成',
           onSubmit: async (v) => {
-            const { close, signal } = openAiWaiting({ title: 'AI 正在设计人物…' });
-            try {
-              const res = await api.aiGenerate(c.projectId, 'character', { count: Number(v.count), guidance: v.guidance }, { signal });
-              aiApplyList(c, res, {
-                title: '生成的角色',
-                render: (it) => `<b>${esc(it.name)}</b><span class="gen-type">${esc(it.role || '未定位')}</span>
+            await runGenTask(c, {
+              title: 'AI 正在设计人物…', icon: '🧑', kind: 'character',
+              params: { count: Number(v.count), guidance: v.guidance },
+              applyTitle: '生成的角色',
+              render: (it) => `<b>${esc(it.name)}</b><span class="gen-type">${esc(it.role || '未定位')}</span>
                     <p>${esc(it.personality || '')}</p><p class="gen-muted">动机：${esc(it.motivation || '—')}</p>`,
-                apply: async (it) => { await c.create('characters', it); }
-              });
-            } finally {
-              close();
-            }
+              apply: async (it) => { await c.create('characters', it); }
+            });
           }
         });
       });
@@ -667,10 +658,6 @@ function charCard(c, d) {
   const rels = d.relations.filter((r) => r.fromId === c.id || r.toId === c.id).length;
   return `
     <article class="char-card${c.pinned ? ' pinned' : ''}${c.done ? ' done-item' : ''}" data-id="${c.id}">
-      <span class="char-card-btns">
-        <button class="pin-btn${c.pinned ? ' on' : ''}" data-pin="${c.id}" title="${c.pinned ? '取消置顶' : '置顶'}" aria-label="置顶">📌</button>
-        <button class="done-btn${c.done ? ' on' : ''}" data-done="${c.id}" title="${c.done ? '标记未完成' : '标记已完成'}" aria-label="已完成">✓</button>
-      </span>
       <header>
         <span class="avatar" style="background:${esc(c.color || '#6b8afd')}">${esc((c.name || '?').slice(0, 1))}</span>
         <div class="char-head-text">
@@ -678,12 +665,14 @@ function charCard(c, d) {
           <span class="role-badge">${esc(c.role || '未定位')}</span>
         </div>
       </header>
+      <span class="char-card-btns">
+        <button class="pin-btn${c.pinned ? ' on' : ''}" data-pin="${c.id}" title="${c.pinned ? '取消置顶' : '置顶'}" aria-label="置顶">📌 ${c.pinned ? '已置顶' : '置顶'}</button>
+        <button class="done-btn${c.done ? ' on' : ''}" data-done="${c.id}" title="${c.done ? '标记未完成' : '标记已完成'}" aria-label="已完成">${c.done ? '✓ 已完成' : '标记完成'}</button>
+      </span>
       <p class="char-line">${esc((c.motivation || c.personality || '（动机待补充）'))}</p>
       <footer>
         ${c.arc ? `<span title="弧光">↗ ${esc(c.arc.slice(0, 18))}</span>` : ''}
         <span title="关系数">🔗 ${rels}</span>
-        ${c.pinned ? '<span class="pin-tag">📌 置顶</span>' : ''}
-        ${c.done ? '<span class="done-tag">✓ 已完成</span>' : ''}
       </footer>
     </article>`;
 }
@@ -1293,22 +1282,18 @@ export function lines(ctx) {
           fields: [{ key: 'guidance', label: '侧重方向（可选）', type: 'textarea', rows: 3, placeholder: '例如：想突出复仇线与救赎线的对立' }],
           okText: '生成',
           onSubmit: async (v) => {
-            const { close, signal } = openAiWaiting({ title: 'AI 正在梳理…' });
-            try {
-              const res = await api.aiGenerate(c.projectId, 'plot', { guidance: v.guidance }, { signal });
-              aiApplyList(c, res, {
-                title: '生成的线路',
-                render: (it) => `<b>${esc(it.name)}</b><span class="gen-type">${esc(c.meta.lineLabel[it.kind] || it.kind)}</span>
+            await runGenTask(c, {
+              title: 'AI 正在梳理…', icon: '🧵', kind: 'plot',
+              params: { guidance: v.guidance },
+              applyTitle: '生成的线路',
+              render: (it) => `<b>${esc(it.name)}</b><span class="gen-type">${esc(c.meta.lineLabel[it.kind] || it.kind)}</span>
                     <p>${esc(it.description || '')}</p>
                     <ol class="gen-beats">${(it.beats || []).map((b2) => `<li>${esc(b2.title)}</li>`).join('')}</ol>`,
-                apply: async (it) => {
-                  const line = await c.create('lines', { name: it.name, kind: it.kind, description: it.description });
-                  for (const b2 of it.beats || []) await c.create('beats', { ...b2, lineId: line.id });
-                }
-              });
-            } finally {
-              close();
-            }
+              apply: async (it) => {
+                const line = await c.create('lines', { name: it.name, kind: it.kind, description: it.description });
+                for (const b2 of it.beats || []) await c.create('beats', { ...b2, lineId: line.id });
+              }
+            });
           }
         });
       });
@@ -1547,13 +1532,15 @@ export function chapters(ctx) {
           ],
           okText: '开始续写',
           onSubmit: async (v) => {
-            const { close: cwClose, signal: cwSignal } = openAiWaiting({ title: 'AI 正在续写…' });
+            const t = c.aiTask('AI 正在续写…', { icon: '✍', detail: '正在读取本章正文并构思…' });
             try {
-              const res = await api.aiContinue(c.projectId, cur.id, v.instruction, Number(v.words), { signal: cwSignal });
-              cwClose();
+              const res = await api.aiContinue(c.projectId, cur.id, v.instruction, Number(v.words), { signal: t.signal });
+              const len = (res.text || '').length;
+              t.progress(1, `已写出约 ${len} 字`);
+              t.finish(`已续写完成，约 ${len} 字`);
               const sep = contentEl.value && !contentEl.value.endsWith('\n') ? '\n\n' : '';
               openModal({
-                title: '续写结果', subtitle: `约 ${(res.text || '').length} 字`, width: 640,
+                title: '续写结果', subtitle: `约 ${len} 字`, width: 640,
                 html: `<div class="result-text">${md(res.text).replace(/<p>/g, '<p class="prose">')}</div>`,
                 buttons: [
                   { label: '放弃', kind: 'ghost' },
@@ -1565,8 +1552,8 @@ export function chapters(ctx) {
                 ]
               });
             } catch (err) {
-              cwClose();
-              toast(err.message, 'error');
+              if (t.stopped) { t.stop('续写已中断'); toast('已停止', 'info'); }
+              else { t.fail(err.message || '续写失败'); toast(err.message || '续写失败', 'error'); }
             }
           }
         });
@@ -1721,17 +1708,13 @@ export function world(ctx) {
           ],
           okText: '生成',
           onSubmit: async (v) => {
-            const { close, signal } = openAiWaiting({ title: 'AI 正在构建世界…' });
-            try {
-              const res = await api.aiGenerate(c.projectId, 'world', { count: Number(v.count), guidance: v.guidance }, { signal });
-              aiApplyList(c, res, {
-                title: '生成的设定',
-                render: (it) => `<b>${esc(it.title)}</b><span class="gen-type">${esc(it.category)}</span><p>${esc(it.content || '')}</p>`,
-                apply: async (it) => { await c.create('world', it); }
-              });
-            } finally {
-              close();
-            }
+            await runGenTask(c, {
+              title: 'AI 正在构建世界…', icon: '🌍', kind: 'world',
+              params: { count: Number(v.count), guidance: v.guidance },
+              applyTitle: '生成的设定',
+              render: (it) => `<b>${esc(it.title)}</b><span class="gen-type">${esc(it.category)}</span><p>${esc(it.content || '')}</p>`,
+              apply: async (it) => { await c.create('world', it); }
+            });
           }
         });
       });
@@ -1743,8 +1726,10 @@ export function world(ctx) {
 
 export function foreshadow(ctx) {
   const d = ctx.data;
-  // 未回收的排前面；勾选回收的进入「已回收」组且组内按勾选时间倒序（刚勾的在该组最前）
+  // 置顶的最前；再看未回收的排前面；勾选回收的进入「已回收」组且组内按勾选时间倒序（刚勾的在该组最前）
   const list = d.foreshadow.slice().sort((a, b) => {
+    const pin = (x) => (x.pinned ? 0 : 1);
+    if (pin(a) !== pin(b)) return pin(a) - pin(b);
     const done = (x) => (x.status === 'paid-off' ? 1 : 0);
     if (done(a) !== done(b)) return done(a) - done(b);
     return byRecent(a, b);
@@ -1770,6 +1755,7 @@ export function foreshadow(ctx) {
                   ${f.plantedChapter ? `<span class="tag">埋于 ${esc(f.plantedChapter)}</span>` : ''}
                 </div>
                 <div class="td-acts">
+                  <button class="${f.pinned ? 'pinned' : ''}" data-act="pin" data-id="${f.id}" title="${f.pinned ? '取消置顶' : '置顶'}">${f.pinned ? '📌 已置顶' : '📌 置顶'}</button>
                   <button data-act="edit" data-id="${f.id}">编辑</button>
                   <button data-act="del" data-id="${f.id}">删除</button>
                 </div>
@@ -1812,6 +1798,12 @@ export function foreshadow(ctx) {
           ? { status: 'planted', paidOffAt: null }
           : { status: 'paid-off', paidOffAt: Date.now() });
       }));
+      root.querySelectorAll('[data-act="pin"]').forEach((b) => b.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const f = c.data.foreshadow.find((x) => x.id === b.dataset.id);
+        if (!f) return;
+        await c.patch('foreshadow', f.id, { pinned: !f.pinned });
+      }));
 
       root.querySelector('[data-act="ai"]').addEventListener('click', () => {
         c.askAI('检查所有未回收的伏笔：指出哪些已经拖太久、哪些可能被读者遗忘，并给出在接下来三章内可以完成的回收方案。');
@@ -1847,8 +1839,8 @@ export function notes(ctx) {
               <header>
                 <span class="cat-tag">${esc(n.category || '备忘')}</span>
                 <span class="note-head-acts">
-                  <button class="icon-btn ${n.pinned ? 'pinned' : ''}" data-act="pin" data-id="${n.id}" title="置顶">${n.pinned ? '★' : '☆'}</button>
-                  <button class="icon-btn ${n.done ? 'on' : ''}" data-act="done" data-id="${n.id}" title="${n.done ? '标记未完成' : '标记已完成'}">${n.done ? '✓' : ''}</button>
+                  <button class="icon-btn ${n.pinned ? 'pinned' : ''}" data-act="pin" data-id="${n.id}" title="置顶">${n.pinned ? '★ 已置顶' : '☆ 置顶'}</button>
+                  <button class="icon-btn ${n.done ? 'on' : ''}" data-act="done" data-id="${n.id}" title="${n.done ? '标记未完成' : '标记已完成'}">${n.done ? '✓ 已完成' : '标记完成'}</button>
                 </span>
               </header>
               <b>${esc(n.title)}</b>
@@ -1921,17 +1913,13 @@ export function notes(ctx) {
           ],
           okText: '开脑暴',
           onSubmit: async (v) => {
-            const { close, signal } = openAiWaiting({ title: 'AI 正在发散…' });
-            try {
-              const res = await api.aiGenerate(c.projectId, 'brainstorm', { topic: v.topic, count: Number(v.count) }, { signal });
-              aiApplyList(c, res, {
-                title: '脑暴结果',
-                render: (it) => `<b>${esc(it.title)}</b><p>${esc(it.detail || '')}</p>${it.risk ? `<p class="gen-muted">风险：${esc(it.risk)}</p>` : ''}`,
-                apply: async (it) => { await c.create('notes', { title: it.title, content: `${it.detail || ''}\n\n风险提示：${it.risk || '—'}`, category: '灵感' }); }
-              });
-            } finally {
-              close();
-            }
+            await runGenTask(c, {
+              title: 'AI 正在发散…', icon: '💡', kind: 'brainstorm',
+              params: { topic: v.topic, count: Number(v.count) },
+              applyTitle: '脑暴结果',
+              render: (it) => `<b>${esc(it.title)}</b><p>${esc(it.detail || '')}</p>${it.risk ? `<p class="gen-muted">风险：${esc(it.risk)}</p>` : ''}`,
+              apply: async (it) => { await c.create('notes', { title: it.title, content: `${it.detail || ''}\n\n风险提示：${it.risk || '—'}`, category: '灵感' }); }
+            });
           }
         });
       });
@@ -2120,9 +2108,41 @@ function openImportDialog(c) {
 
 /* ==================================================================== AI 生成结果应用弹窗 */
 
-function aiApplyList(ctx, res, { title, render, apply }) {
+/**
+ * 跑一个「AI 生成」任务：过程显示在 AI 助手里（会自动打开面板、可随时停止），
+ * 勾选应用之后汇报最终执行了多少项。生成大纲 / 角色 / 线路 / 设定 / 脑暴都走这里，
+ * 于是这些功能看起来就和「跟助手对话」一样。
+ */
+async function runGenTask(ctx, { title, icon, kind, params, applyTitle, render, apply }) {
+  const t = ctx.aiTask(title, { icon, detail: '正在读取项目数据并思考…' });
+  try {
+    const res = await api.aiGenerate(ctx.projectId, kind, params, { signal: t.signal });
+    const n = (res.data || []).length;
+    if (!n) {
+      t.fail(res.demo ? '演示模式没有产出内容（去「设置」配置模型后更好）' : '模型没有返回可用内容，可稍后重试');
+      toast('没有生成结果', 'error');
+      return;
+    }
+    t.progress(0, `已生成 ${n} 条候选`);
+    t.note(`共 ${n} 条候选，勾选后写入项目`);
+    aiApplyList(ctx, res, {
+      title: applyTitle, render, apply,
+      onApplied: (k) => {
+        if (k) t.finish(`已完成：生成 ${n} 条候选，写入项目 ${k} 项`);
+        else t.finish(`已生成 ${n} 条候选（未应用）`);
+      }
+    });
+  } catch (err) {
+    if (t.stopped) { t.stop('生成已中断'); toast('已停止', 'info'); } else {
+      t.fail(err.message || '生成失败');
+      toast(err.message || '生成失败', 'error');
+    }
+  }
+}
+
+function aiApplyList(ctx, res, { title, render, apply, onApplied }) {
   const items = res.data || [];
-  if (!items.length) return toast('没有生成结果', 'error');
+  if (!items.length) { toast('没有生成结果', 'error'); if (onApplied) onApplied(0); return; }
 
   openModal({
     title,
@@ -2134,7 +2154,7 @@ function aiApplyList(ctx, res, { title, render, apply }) {
           <div>${render(it)}</div>
         </label>`).join('')}</div>`,
     buttons: [
-      { label: '取消', kind: 'ghost' },
+      { label: '取消', kind: 'ghost', onClick: () => { if (onApplied) onApplied(0); } },
       {
         label: '应用选中', kind: 'primary', keepOpen: true,
         onClick: async (body, wrap) => {
@@ -2142,6 +2162,7 @@ function aiApplyList(ctx, res, { title, render, apply }) {
           if (!idxs.length) { toast('没有选中任何项', 'error'); return; }
           for (const i of idxs) await apply(items[i]);
           closeAndRefresh(wrap, ctx, idxs.length);
+          if (onApplied) onApplied(idxs.length);
         }
       }
     ]
@@ -2335,12 +2356,6 @@ export function memos(ctx) {
           <span class="memo-tip">${ctx.apiReady ? '' : '未配置模型，将用本地压缩（较粗糙）；到右上「设置」配置后更佳'}</span>
         </div>
 
-        <div class="memo-progress" id="memoProgress" hidden>
-          <div class="memo-bar"><i id="memoBarFill"></i></div>
-          <span id="memoProgressText"></span>
-          <button class="btn ghost xs" id="memoStop">停止</button>
-        </div>
-
         <div class="memo-list">
           ${list.length
         ? list.map((c, i) => memoRow(c, i)).join('')
@@ -2349,20 +2364,7 @@ export function memos(ctx) {
       </div>`,
 
     mount(root, c) {
-      const prog = root.querySelector('#memoProgress');
-      const bar = root.querySelector('#memoBarFill');
-      const progText = root.querySelector('#memoProgressText');
-      const stopBtn = root.querySelector('#memoStop');
-      let stopFlag = false;
-      let running = false;
-      let ac = null;
-
-      const showProg = () => { prog.hidden = false; };
-      const hideProg = () => { prog.hidden = true; bar.style.width = '0%'; };
-      const setProg = (done, total, text) => {
-        bar.style.width = `${total ? Math.round((done / total) * 100) : 0}%`;
-        progText.textContent = text || `已完成 ${done} / ${total}`;
-      };
+      let running = false;   // 防止重复点击「全部生成」并发跑批
 
       function applyToDom(id, memo) {
         const row = root.querySelector(`.memo-row[data-id="${id}"]`);
@@ -2381,40 +2383,44 @@ export function memos(ctx) {
 
       async function runBatch(ids) {
         if (running || !ids.length) return;
-        running = true; stopFlag = false; ac = new AbortController();
-        showProg();
+        running = true;
+        // 进度与结果并入 AI 助手对话流：自动打开面板 → 显示第几章 / 共几章 → 末尾汇报成功多少章
+        const t = c.aiTask('AI 正在生成记忆点…', { icon: '🧠', total: ids.length, detail: `共 ${ids.length} 章待处理` });
         let ok = 0; let fail = 0;
         for (let i = 0; i < ids.length; i++) {
-          if (stopFlag) break;
-          setProg(i, ids.length, `正在生成 ${i + 1} / ${ids.length}…`);
+          if (t.stopped) break;
+          const ch = c.data.chapters.find((x) => x.id === ids[i]);
+          t.progress(i, `正在生成 ${i + 1} / ${ids.length}${ch ? `：${ch.title}` : ''}`);
           try {
-            const res = await api.aiMemos(c.projectId, { chapterIds: [ids[i]], onlyMissing: false }, { signal: ac.signal });
+            const res = await api.aiMemos(c.projectId, { chapterIds: [ids[i]], onlyMissing: false }, { signal: t.signal });
             const up = (res.updated && res.updated[0]) || null;
-            if (up) { ok += 1; applyToDom(up.id, up.memo || ''); } else { fail += 1; }
+            if (up) { ok += 1; applyToDom(up.id, up.memo || ''); t.item(ch ? ch.title : ids[i]); }
+            else fail += 1;
           } catch (_) { fail += 1; }
-          setProg(i + 1, ids.length, `已完成 ${i + 1} / ${ids.length}（成功 ${ok}）`);
+          t.progress(i + 1, `已完成 ${i + 1} / ${ids.length}（成功 ${ok}）`);
         }
         running = false;
-        hideProg();
+        if (t.stopped) { t.stop(`已中断：成功生成 ${ok} 章`); toast('已停止', 'info'); }
+        else {
+          t.finish(`已完成：成功 ${ok} 章${fail ? `，失败 ${fail} 章` : ''}`);
+          toast(`生成完成：成功 ${ok} 章${fail ? `，失败 ${fail} 章` : ''}`, fail && !ok ? 'error' : 'success');
+        }
         await c.reload();
-        if (stopFlag) toast('已停止', 'info');
-        else toast(`生成完成：成功 ${ok} 章${fail ? `，失败 ${fail} 章` : ''}`, fail && !ok ? 'error' : 'success');
       }
 
-      if (stopBtn) stopBtn.addEventListener('click', () => { stopFlag = true; if (ac) ac.abort(); });
-
       root.querySelectorAll('[data-act="gen-one"]').forEach((b) => b.addEventListener('click', async () => {
-        const row = b.closest('.memo-row');
-        const id = row.dataset.id;
-        const old = b.textContent;
-        b.disabled = true; b.textContent = '生成中…';
-        ac = new AbortController();
+        const id = b.closest('.memo-row').dataset.id;
+        const ch = c.data.chapters.find((x) => x.id === id);
+        const t = c.aiTask(`AI 正在生成「${ch ? ch.title : '本章'}」记忆点…`, { icon: '🧠', total: 1, detail: '正在读取本章正文…' });
         try {
-          const res = await api.aiMemos(c.projectId, { chapterIds: [id], onlyMissing: false }, { signal: ac.signal });
+          const res = await api.aiMemos(c.projectId, { chapterIds: [id], onlyMissing: false }, { signal: t.signal });
           const up = (res.updated && res.updated[0]) || null;
-          if (up) { applyToDom(id, up.memo || ''); c.syncLocal(); toast('已生成', 'success'); }
-          else toast('该章暂无正文，无法生成', 'error');
-        } catch (err) { toast(err.message, 'error'); } finally { b.disabled = false; b.textContent = old; }
+          if (up) { applyToDom(id, up.memo || ''); c.syncLocal(); t.progress(1, '已生成'); t.finish(`已生成「${ch ? ch.title : '本章'}」的记忆点`); toast('已生成', 'success'); }
+          else { t.fail('该章暂无正文，无法生成'); toast('该章暂无正文，无法生成', 'error'); }
+        } catch (err) {
+          if (t.stopped) { t.stop('已中断'); toast('已停止', 'info'); }
+          else { t.fail(err.message || '生成失败'); toast(err.message || '生成失败', 'error'); }
+        }
       }));
 
       root.querySelectorAll('[data-act="clear-one"]').forEach((b) => b.addEventListener('click', async () => {

@@ -33,6 +33,11 @@ export function createAgent(ctx) {
   let pendingTimer = null;
   let live = null;          // 流式中的现场（思考过程 / 正文 / 已执行操作）
   let lastPaint = 0;
+  // 「其它 AI 功能」（生成记忆点、续写、生成大纲/角色/线路/设定/脑暴）的执行记录。
+  // 这类任务不是对话，不写服务端 messages，只在本机内存里按时间并入对话流显示，
+  // 这样点「全部生成」之后会像跟助手对话一样：自动打开面板 → 显示正在做什么 → 末尾汇报条数。
+  let tasks = [];
+  let taskTimer = null;
 
   function statusHtml() {
     const configured = ctx.settings.hasKey;
@@ -44,13 +49,55 @@ export function createAgent(ctx) {
 
   const secs = (ms) => (ms / 1000).toFixed(1);
 
-  /** 助手「思考过程」折叠块——实时与历史消息共用 */
-  function thinkBlock(thinking, thinkMs, open) {
+  /**
+   * 助手「思考过程」折叠块——实时与历史消息共用。
+   * key 用来在整体重绘时按块还原各自的 scrollTop：思考块内部是可滚动区域，
+   * 若不给它一个稳定标识，用户一滚动就会被重绘弹回顶部。
+   */
+  function thinkBlock(thinking, thinkMs, open, key) {
     if (!thinking) return '';
+    const attr = key ? ` data-think="${esc(key)}"` : '';
+    const id = key === 'live' ? ' id="liveThink"' : '';
     return `<details class="think"${open ? ' open' : ''}>
       <summary>🧠 思考过程${thinkMs ? `（${secs(thinkMs)} 秒）` : ''}</summary>
-      <div class="think-body" id="liveThink">${esc(thinking)}</div>
+      <div class="think-body"${attr}${id}>${esc(thinking)}</div>
     </details>`;
+  }
+
+  /** 一个 AI 任务的执行卡片：进度条 / 明细 / 结束汇报 */
+  function taskHtml(t) {
+    const running = t.status === 'running';
+    const waited = Math.max(0, Math.round(((t.endedAt || Date.now()) - t.startedAt) / 1000));
+    const pct = t.total > 0 ? Math.min(100, Math.round((t.done / t.total) * 100)) : 0;
+    const bar = t.total > 0
+      ? `<div class="task-bar"><i style="width:${t.status === 'done' ? 100 : pct}%"></i></div>` : '';
+    const prog = t.total > 0
+      ? `<div class="task-prog">已完成 <b>${t.done}</b> / ${t.total}${t.detail ? ` · ${esc(t.detail)}` : ''}</div>`
+      : (t.detail && running ? `<div class="task-prog">${esc(t.detail)}</div>` : '');
+    const busy = running
+      ? `<div class="live-status"><span class="dot-typing"><i></i><i></i><i></i></span><em>正与模型通信中…模型繁忙会自动重试，不会中途放弃</em></div>` : '';
+    const notes = t.notes.length
+      ? `<div class="live-notes">${t.notes.map((n) => `<span class="live-note">· ${esc(n)}</span>`).join('')}</div>` : '';
+    const items = t.items.length
+      ? `<div class="live-ops">${t.items.slice(-14).map((s) => `<span class="live-op">✓ ${esc(s)}</span>`).join('')}</div>` : '';
+    let foot;
+    if (running) {
+      foot = `<div class="task-foot run"><button class="btn ghost xs danger-text" data-task-stop="${t.id}">■ 停止</button>
+        <span class="task-wait">已等待 <b data-task-secs="${t.id}">${waited}</b> 秒</span></div>`;
+    } else if (t.status === 'done') {
+      foot = `<div class="task-foot ok">✅ ${esc(t.summary || `已完成 ${t.done || t.items.length} 项`)}<span class="task-secs">用时 ${waited} 秒</span></div>`;
+    } else if (t.status === 'stopped') {
+      foot = `<div class="task-foot stopped">⏹ 已停止${t.summary ? ` · ${esc(t.summary)}` : ''}<span class="task-secs">用时 ${waited} 秒</span></div>`;
+    } else {
+      foot = `<div class="task-foot err">⚠️ ${esc(t.error || '执行失败')}<span class="task-secs">用时 ${waited} 秒</span></div>`;
+    }
+    return `<div class="bubble assistant task" data-task="${t.id}">
+      <div class="bubble-avatar">✦</div>
+      <div class="bubble-body">
+        <div class="task-head"><span class="task-ico">${t.icon || '🧩'}</span><b>${esc(t.title)}</b></div>
+        ${bar}${prog}${busy}${notes}${items}${foot}
+      </div>
+    </div>`;
   }
 
   function msgsHtml() {
@@ -59,14 +106,18 @@ export function createAgent(ctx) {
     const mine = pendingText
       ? `<div class="bubble user"><div class="bubble-body plain">${esc(pendingText)}</div>
           <button class="bubble-copy" data-copy-mode="pending" title="复制这条消息">复制</button></div>` : '';
-    if (!msgs.length && !pendingText && !live) {
+    if (!msgs.length && !pendingText && !live && !tasks.length) {
       return `<div class="agent-welcome">
         <div class="welcome-glyph">✦</div>
         <h4>我能读到你项目里的一切</h4>
         <p>大纲、角色、线路、设定都会进入我的上下文；章节会带标题和开头，你正打开的那一章我会直接读到全文，其它章节你说一声我就能去读。你既可以让我想，也可以让我直接动手改——新建角色、补大纲、铺节拍都行。</p>
       </div>`;
     }
-    return msgs.map((m, i) => bubble(m, i)).join('') + mine + liveHtml();
+    // 对话消息与「AI 任务执行记录」按时间合并成同一条流——切换任务就像助手在做同一件事
+    const timeline = msgs.map((m, i) => ({ at: m.createdAt || 0, html: () => bubble(m, i) }));
+    tasks.forEach((t) => timeline.push({ at: t.startedAt || 0, html: () => taskHtml(t) }));
+    timeline.sort((a, b) => a.at - b.at);
+    return timeline.map((x) => x.html()).join('') + mine + liveHtml();
   }
 
   function liveHtml() {
@@ -85,7 +136,7 @@ export function createAgent(ctx) {
     return `<div class="bubble assistant">
       <div class="bubble-avatar">✦</div>
       <div class="bubble-body">
-        ${thinkBlock(live.thinking, live.thinkMs, true)}
+        ${thinkBlock(live.thinking, live.thinkMs, true, 'live')}
         ${idle ? `<div class="live-status"><span class="dot-typing"><i></i><i></i><i></i></span><em>正在读取项目数据并思考…</em></div>` : ''}
         ${notes}
         ${ops}
@@ -107,7 +158,7 @@ export function createAgent(ctx) {
     return `<div class="bubble assistant">
       <div class="bubble-avatar">✦</div>
       <div class="bubble-body">
-        ${thinkBlock(m.thinking, m.thinkMs, false)}
+        ${thinkBlock(m.thinking, m.thinkMs, false, `m${idx}`)}
         ${md(m.content)}${opsHtml(m.ops)}
         ${meta.length ? `<div class="bubble-meta">${meta.join(' · ')}</div>` : ''}
       </div>
@@ -257,11 +308,129 @@ export function createAgent(ctx) {
     const st = root.querySelector('#aiStatus');
     if (st) st.outerHTML = statusHtml();
     const box = root.querySelector('#agentMsgs');
+    // 重绘会重建 #agentMsgs 的整个 DOM，内部滚动位置随之归零——
+    // 用户读「思考过程」或往上翻历史时，就表现为"一滚动就被弹回顶部"。
+    // 这里在重绘前记下主列表与每个思考块（按 data-think 键）的 scrollTop，重绘后还原。
+    const prevTop = box.scrollTop;
     const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 140;
+    const savedThink = {};
+    const savedOpen = new Set();
+    box.querySelectorAll('.think-body[data-think]').forEach((el) => {
+      if (el.scrollTop) savedThink[el.dataset.think] = el.scrollTop;
+      if (el.closest('details.think') && el.closest('details.think').open) savedOpen.add(el.dataset.think);
+    });
     box.innerHTML = msgsHtml();
-    if (nearBottom) box.scrollTop = box.scrollHeight;
+    box.querySelectorAll('.think-body[data-think]').forEach((el) => {
+      const det = el.closest('details.think');
+      if (det && savedOpen.has(el.dataset.think)) det.open = true;   // 展开态别被重绘吃掉
+      const top = savedThink[el.dataset.think];
+      if (top) el.scrollTop = top;
+    });
+    // 贴着底部的照旧跟到底；用户手动上翻过，就停在原处，不要抢回顶部
+    box.scrollTop = nearBottom ? box.scrollHeight : prevTop;
     bindCopy(box);
+    bindTaskStop(box);
     syncSend();
+    ensureTicker();
+  }
+
+  /** 任务卡上的「停止」：中断这次请求，并把任务记为已停止 */
+  function stopTask(id) {
+    const t = tasks.find((x) => x.id === id);
+    if (!t || t.status !== 'running') return;
+    t.abortFn();
+    t.status = 'stopped';
+    t.endedAt = Date.now();
+    paint();
+  }
+
+  function bindTaskStop(box) {
+    box.querySelectorAll('[data-task-stop]').forEach((b) => {
+      b.addEventListener('click', () => stopTask(b.dataset.taskStop));
+    });
+  }
+
+  /** 有任务在跑时每秒刷新「已等待 N 秒」——只改数字，不整体重绘，避免闪烁 */
+  function ensureTicker() {
+    const running = tasks.some((t) => t.status === 'running');
+    if (running && !taskTimer) {
+      taskTimer = setInterval(() => {
+        tasks.forEach((t) => {
+          if (t.status !== 'running') return;
+          const el = root.querySelector(`[data-task-secs="${t.id}"]`);
+          if (el) el.textContent = String(Math.round((Date.now() - t.startedAt) / 1000));
+        });
+      }, 1000);
+    } else if (!running && taskTimer) {
+      clearInterval(taskTimer);
+      taskTimer = null;
+    }
+  }
+
+  /**
+   * 开一个「AI 任务」：其它 AI 功能（生成记忆点 / 续写 / 生成大纲 / 角色 / 线路 / 设定 / 脑暴）
+   * 调用它之后，执行过程会像对话一样出现在助手里，结束时汇报执行了多少项。
+   * 返回驱动器：signal 传给接口，点「停止」即可中断；另有 progress / item / note / finish / fail / stop。
+   */
+  function beginTask(title, opts = {}) {
+    const t = {
+      id: `task_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      title: String(title || 'AI 任务'),
+      icon: opts.icon || '🧩',
+      startedAt: Date.now(),
+      endedAt: 0,
+      status: 'running',
+      detail: opts.detail || '',
+      total: Number(opts.total) || 0,
+      done: 0,
+      items: [],
+      notes: [],
+      summary: '',
+      error: ''
+    };
+    const ctrl = new AbortController();
+    t.abortFn = () => { try { ctrl.abort(); } catch (_) { /* 已中断 */ } };
+    tasks.push(t);
+    paint();
+    return {
+      id: t.id,
+      signal: ctrl.signal,
+      get stopped() { return ctrl.signal.aborted; },
+      total(n) { t.total = Number(n) || 0; livePaint(true); return this; },
+      progress(done, detail) {
+        t.done = Math.max(0, Number(done) || 0);
+        if (detail != null) t.detail = String(detail);
+        livePaint(true);
+        return this;
+      },
+      item(label) { t.items.push(String(label)); livePaint(true); return this; },
+      note(text) { t.notes.push(String(text)); livePaint(true); return this; },
+      finish(summary) {
+        t.status = 'done';
+        t.endedAt = t.endedAt || Date.now();
+        t.summary = summary || `已完成 ${t.done || t.items.length} 项`;
+        t.detail = '';
+        paint();
+        return this;
+      },
+      fail(message) {
+        t.status = 'error';
+        t.endedAt = t.endedAt || Date.now();
+        t.error = String(message || '执行失败');
+        t.detail = '';
+        paint();
+        return this;
+      },
+      stop(summary) {
+        t.abortFn();
+        t.status = 'stopped';
+        t.endedAt = t.endedAt || Date.now();
+        if (summary) t.summary = String(summary);
+        paint();
+        return this;
+      },
+      abort() { t.abortFn(); }
+    };
   }
 
   /** 每条消息（我的 / 助手的 / 正在生成的）都挂一个复制按钮 */
@@ -373,7 +542,7 @@ export function createAgent(ctx) {
     if (result.type === 'error') toast('调用失败，问题已保留', 'error');
   }
 
-  return { paint, send };
+  return { paint, send, beginTask };
 }
 
 /* ---------------------------------------------------------------- 设置弹窗 */

@@ -119,6 +119,11 @@ const ctx = {
 
   render,
   askAI,
+  /**
+   * 开一个「AI 任务」：自动打开 AI 助手面板，执行过程与结果都显示在对话流里，
+   * 结束时汇报执行了多少项。生成记忆点、续写、生成大纲/角色/线路/设定/脑暴都走这里。
+   */
+  aiTask(title, opts) { toggleAgent(true); return agent.beginTask(title, opts); },
   toggleAgent,
   refreshProjects: () => loadProjects(),
   refreshSettings: async () => {

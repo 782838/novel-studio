@@ -27,19 +27,25 @@ const GIT = process.env.GIT_BIN
 
 /* 证书：本机装了 HTTPS 中间人（如 SteamTools）时，Node 自带 CA 校验会报
  * "unable to verify the first certificate"，而 GitHub API 走的就是 fetch。
- * 这里和 build-win.js 一样，自动找合并了该根证书的 CA 包并指过去（没有就原样跑，不影响别的机器）。 */
+ * 注意 NODE_EXTRA_CA_CERTS **只在进程启动时生效**，运行中途设 process.env 无效，
+ * 所以这里找到 CA 包后带着环境变量重启自己（没有该文件就原样跑，不影响别的机器）。 */
 (() => {
-  if (process.env.NODE_EXTRA_CA_CERTS) return;
+  if (process.env.NOVEL_CA_DONE === '1') return;
   const cands = [
+    process.env.NODE_EXTRA_CA_CERTS,
     process.env.NOVEL_CA_BUNDLE,
     process.env.USERPROFILE && path.join(process.env.USERPROFILE, '.git-ca-bundle.crt'),
     process.env.HOME && path.join(process.env.HOME, '.git-ca-bundle.crt')
   ].filter(Boolean);
   const ca = cands.find((p) => { try { return fs.existsSync(p); } catch (_) { return false; } });
-  if (ca) {
-    process.env.NODE_EXTRA_CA_CERTS = ca;
-    console.log('· 已指定 CA 包（本机 HTTPS 代理场景）:', ca);
-  }
+  if (!ca) return;
+  if (process.env.NODE_EXTRA_CA_CERTS) { console.log('· 使用 CA 包（本机 HTTPS 代理场景）:', ca); return; }
+  const r = spawnSync(process.execPath, [__filename, ...process.argv.slice(2)], {
+    cwd: ROOT,
+    stdio: 'inherit',
+    env: { ...process.env, NODE_EXTRA_CA_CERTS: ca, NOVEL_CA_DONE: '1' }
+  });
+  process.exit(r.status === null ? 1 : r.status);
 })();
 
 const REPO = process.env.REPO_NAME || 'novel-studio';

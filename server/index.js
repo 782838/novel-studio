@@ -108,6 +108,17 @@ function send(res, code, body, headers = {}) {
 const ok = (res, data) => send(res, 200, data);
 const fail = (res, err, code = 400) => send(res, code, { error: String(err && err.message ? err.message : err) });
 
+/**
+ * 客户端停止信号：前端点「停止」会 abort 这次 fetch，触发底层 TCP 连接关闭，
+ * 这里监听 req 的 close 事件，把断开转成 AbortController，传给 AI 调用——
+ * 这样服务端正在无限重试的请求能在用户点停止时立刻中止（与聊天助手机制一致）。
+ */
+function clientSignal(req) {
+  const ctrl = new AbortController();
+  req.on('close', () => ctrl.abort());
+  return ctrl.signal;
+}
+
 function readBody(req, limit = 64 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -892,28 +903,31 @@ on('POST', '/api/ai/chat/stream', async ({ req, res, body }) => {
   }
 });
 
-on('POST', '/api/ai/generate', async ({ res, body }) => {
+on('POST', '/api/ai/generate', async ({ req, res, body }) => {
   const { projectId, kind, params } = body;
   if (!projectId) return fail(res, '缺少 projectId');
-  const result = await ai.generate({ projectId, kind, params: params || {} });
+  const signal = clientSignal(req);
+  const result = await ai.generate({ projectId, kind, params: params || {}, signal });
   ok(res, result);
 });
 
-on('POST', '/api/ai/continue', async ({ res, body }) => {
+on('POST', '/api/ai/continue', async ({ req, res, body }) => {
   const { projectId, chapterId, instruction, words } = body;
   if (!chapterId) return fail(res, '缺少 chapterId');
-  const result = await ai.continueChapter({ projectId, chapterId, instruction: instruction || '', words: words || 600 });
+  const signal = clientSignal(req);
+  const result = await ai.continueChapter({ projectId, chapterId, instruction: instruction || '', words: words || 600, signal });
   ok(res, result);
 });
 
 // 生成「AI 记忆点」：把章节正文压缩成精简剧情摘要。
 // chapterIds 可为单章 id、id 数组或省略（省略=全书）；onlyMissing 默认 true 只补未生成的。
-on('POST', '/api/ai/memos', async ({ res, body }) => {
+on('POST', '/api/ai/memos', async ({ req, res, body }) => {
   const { projectId, chapterIds, onlyMissing } = body;
   if (!projectId) return fail(res, '缺少 projectId');
+  const signal = clientSignal(req);
   try {
     const ids = Array.isArray(chapterIds) ? chapterIds : (chapterIds ? [chapterIds] : null);
-    const result = await ai.generateMemos({ projectId, chapterIds: ids, onlyMissing: onlyMissing !== false });
+    const result = await ai.generateMemos({ projectId, chapterIds: ids, onlyMissing: onlyMissing !== false, signal });
     ok(res, result);
   } catch (err) { fail(res, err); }
 });

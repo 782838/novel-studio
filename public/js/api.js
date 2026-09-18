@@ -13,8 +13,8 @@ function req(url, options = {}) {
   });
 }
 
-const get = (url) => req(url);
-const post = (url, body) => req(url, { method: 'POST', body });
+const get = (url, options) => req(url, options);
+const post = (url, body, options) => req(url, { method: 'POST', body, ...(options || {}) });
 const patch = (url, body) => req(url, { method: 'PATCH', body });
 const put = (url, body) => req(url, { method: 'PUT', body });
 const del = (url) => req(url, { method: 'DELETE' });
@@ -86,11 +86,12 @@ export default {
     }
     return final;
   },
-  aiGenerate: (projectId, kind, params) => post('/api/ai/generate', { projectId, kind, params }),
-  aiContinue: (projectId, chapterId, instruction, words) =>
-    post('/api/ai/continue', { projectId, chapterId, instruction, words }),
-  /** 生成 AI 记忆点：opts 可含 { chapterIds, onlyMissing } */
-  aiMemos: (projectId, opts = {}) => post('/api/ai/memos', { projectId, ...opts }),
+  // signal 透传到后端：用户点「停止」时 abort 这次请求，后端立即中止无限重试
+  aiGenerate: (projectId, kind, params, options) => post('/api/ai/generate', { projectId, kind, params }, options),
+  aiContinue: (projectId, chapterId, instruction, words, options) =>
+    post('/api/ai/continue', { projectId, chapterId, instruction, words }, options),
+  /** 生成 AI 记忆点：opts 可含 { chapterIds, onlyMissing }；options 可含 { signal } */
+  aiMemos: (projectId, opts = {}, options) => post('/api/ai/memos', { projectId, ...opts }, options),
   aiContext: (projectId) => get(`/api/ai/context/${projectId}`),
   clearMessages: (pid) => del(`/api/projects/${pid}/messages`)
 };

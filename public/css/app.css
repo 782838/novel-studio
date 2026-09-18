@@ -666,7 +666,32 @@ body.writing-full .editor-content {
 .note-full { white-space: pre-wrap; line-height: 1.9; font-size: 13.5px; color: var(--text-2); }
 .lane-pinned { color: #b9791a !important; border-color: rgba(224,165,46,.5) !important; }
 
+/* ---------------------------------------------------------- 已完成 / 置顶 通用状态 */
+.done-item { opacity: .55; filter: saturate(.55); }
+.done-item:hover { opacity: .8; }
+.done-tag, .done-btn.on { color: var(--green) !important; }
+.is-done { opacity: .62; border-left-style: dashed !important; }
+.lane.is-done { border-left-color: var(--muted) !important; }
+
+/* 笔记头部：置顶 / 已完成 按钮并排 */
+.note-head-acts { display: flex; gap: 4px; }
+.note-head-acts .icon-btn { font-size: 13px; padding: 2px 4px; border-radius: 5px; opacity: .5; background: transparent; border: none; cursor: pointer; line-height: 1; }
+.note-head-acts .icon-btn:hover { opacity: 1; background: var(--surface-2); }
+.note-head-acts .icon-btn.pinned, .note-head-acts .icon-btn.on { opacity: 1; }
+
+/* 角色卡：置顶 / 已完成 按钮容器（替代原来绝对定位的单独置顶按钮） */
+.char-card-btns { position: absolute; top: 8px; right: 8px; z-index: 2; display: flex; gap: 2px; }
+.char-card-btns .pin-btn, .char-card-btns .done-btn { position: static; opacity: .45; padding: 4px; border-radius: 6px; border: none; background: transparent; cursor: pointer; font-size: 14px; line-height: 1; }
+.char-card-btns .pin-btn:hover, .char-card-btns .done-btn:hover { opacity: 1; background: var(--surface-2); }
+.char-card-btns .pin-btn.on { opacity: 1; filter: drop-shadow(0 0 2px rgba(224,165,46,.7)); }
+.char-card-btns .done-btn.on { opacity: 1; filter: drop-shadow(0 0 2px rgba(43,160,90,.6)); }
+
+/* 线路：已完成 按钮激活态 */
+.lane-done { color: var(--green) !important; border-color: rgba(43,160,90,.5) !important; }
+
 /* ---------------------------------------------------------- 伏笔 */
+
+/* 伏笔沿用 .tr.done-row（已回收）样式，其「已回收」即等价的已完成态 */
 
 .table { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
 .tr { display: flex; align-items: flex-start; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--border); }
@@ -1233,4 +1258,13 @@ body.agent-open .agent-panel { width: 396px; flex-basis: 396px; border-left-colo
 @media (max-width: 900px) {
   .memo-head-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* ---------------------------------------------------------- AI 等待/重试浮层 */
+
+.ai-wait { display: flex; flex-direction: column; gap: 4px; padding: 4px 0; }
+.ai-wait-row { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); }
+.ai-wait-tip { font-size: 12.5px; color: var(--text-2); line-height: 1.7; margin-top: 2px; }
+.ai-wait-time { font-size: 13px; color: var(--text-2); margin-top: 6px; }
+.ai-wait-time b { color: var(--accent); font-variant-numeric: tabular-nums; }
+.ai-wait #aiWaitStop { align-self: flex-start; }
 

@@ -262,3 +262,41 @@ export function openConfirm({ title = '确认操作', message, danger = false, o
     });
   });
 }
+
+/**
+ * AI 长任务等待浮层：免费模型繁忙/限流时会一直重试，但前端看不到进度，容易以为「卡死/失败了」。
+ * 这个浮层实时显示「已等待 N 秒」并提示「模型繁忙会自动重试」，且提供「停止」按钮——
+ * 点停止即 abort 这次请求，后端会在下一次重试前检测到断开并中止，与聊天助手的停止一致。
+ * @returns {{ close: Function, signal: AbortSignal, abort: Function }}
+ */
+export function openAiWaiting({ title = 'AI 正在生成…', hint = '免费模型繁忙时会自动重试，可随时点「停止」' } = {}) {
+  const ctrl = new AbortController();
+  let stopped = false;
+  const { wrap, close } = openModal({
+    title, width: 440, footer: false,
+    html: `
+      <div class="ai-wait">
+        <div class="ai-wait-row"><span class="dot-typing sm"><i></i><i></i><i></i></span><span>正在请求模型…</span></div>
+        <div class="ai-wait-tip">${esc(hint)}</div>
+        <div class="ai-wait-time">已等待 <b id="aiWaitSec">0</b> 秒</div>
+        <button class="btn danger xs" id="aiWaitStop">■ 停止</button>
+      </div>`,
+    onMount: (body) => {
+      const secEl = body.querySelector('#aiWaitSec');
+      const stopBtn = body.querySelector('#aiWaitStop');
+      const timer = setInterval(() => {
+        if (secEl) secEl.textContent = String((Number(secEl.textContent || 0) + 1));
+      }, 1000);
+      wrap._aiTimer = timer;
+      stopBtn.addEventListener('click', () => {
+        if (stopped) return;
+        stopped = true;
+        ctrl.abort();
+        stopBtn.textContent = '正在停止…';
+        stopBtn.disabled = true;
+      });
+    }
+  });
+  const closeAll = () => { if (wrap._aiTimer) clearInterval(wrap._aiTimer); close(); };
+  return { close: closeAll, signal: ctrl.signal, abort: () => ctrl.abort() };
+}

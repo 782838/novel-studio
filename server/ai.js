@@ -1194,14 +1194,15 @@ async function runAgent({ projectId, message, history = [], chapterId = null, on
 
 // ---------------------------------------------------------------- 结构化生成
 
-async function generateJSON(prompt, { maxTokens = 3000, temperature = 0.9 } = {}) {
+async function generateJSON(prompt, { maxTokens = 3000, temperature = 0.9, signal } = {}) {
   const json = await callChat({
     messages: [
       { role: 'system', content: '你输出的内容必须是可以被 JSON.parse 直接解析的纯 JSON，不要包含解释文字、不要包裹 ``` 代码块。' },
       { role: 'user', content: prompt }
     ],
     temperature,
-    maxTokens
+    maxTokens,
+    signal
   });
   const text = json?.choices?.[0]?.message?.content || '';
   return parseLooseJSON(text);
@@ -1225,16 +1226,18 @@ function parseLooseJSON(text) {
 }
 
 /** 统一的多形态生成入口 */
-async function generate({ projectId, kind, params = {} }) {
+async function generate({ projectId, kind, params = {}, signal } = {}) {
   const ctx = buildContext(projectId);
   const p = ctx.project;
   const intro = `作品：《${p.title}》${p.genre ? `｜类型：${p.genre}` : ''}\n简介：${p.synopsis || '（暂无）'}\n`;
 
   if (!llmEnabled()) return demoGenerate(projectId, kind, params);
+  // 把客户端停止信号透传到每一个 callChat（记忆点/续写等生成同理）
+  const g = (prompt, opts) => generateJSON(prompt, { ...(opts || {}), signal });
 
   if (kind === 'outline') {
     const anchor = params.parentId ? store.find('outline', params.parentId) : null;
-    const data = await generateJSON([
+    const data = await g([
       intro,
       '\n已有大纲：\n', buildOutlineText(projectId),
       anchor ? `\n请在「${anchor.title}」下继续扩展。` : '\n请在合适的位置继续扩展。',
@@ -1246,7 +1249,7 @@ async function generate({ projectId, kind, params = {} }) {
   }
 
   if (kind === 'character') {
-    const data = await generateJSON([
+    const data = await g([
       intro,
       '\n已有角色：\n', buildCharacterText(projectId),
       `\n作者要求：${params.guidance || '补全缺失的重要角色'}`,
@@ -1258,7 +1261,7 @@ async function generate({ projectId, kind, params = {} }) {
   }
 
   if (kind === 'plot') {
-    const data = await generateJSON([
+    const data = await g([
       intro,
       '\n已有大纲：\n', buildOutlineText(projectId),
       '\n已有角色：\n', buildCharacterText(projectId),
@@ -1271,7 +1274,7 @@ async function generate({ projectId, kind, params = {} }) {
   }
 
   if (kind === 'world') {
-    const data = await generateJSON([
+    const data = await g([
       intro,
       '\n已有设定：\n', buildWorldText(projectId),
       `\n方向：${params.guidance || '补全这个世界最关键的设定'}`,
@@ -1282,7 +1285,7 @@ async function generate({ projectId, kind, params = {} }) {
   }
 
   if (kind === 'brainstorm') {
-    const data = await generateJSON([
+    const data = await g([
       intro,
       '\n上下文：\n', buildContext(projectId).text.slice(0, 4000),
       `\n脑暴问题：${params.topic || '给出下一个阶段的创作建议'}`,
@@ -1293,7 +1296,7 @@ async function generate({ projectId, kind, params = {} }) {
   }
 
   if (kind === 'audit') {
-    const data = await generateJSON([
+    const data = await g([
       intro,
       '\n完整上下文：\n', buildContext(projectId).text,
       '\n请做一次创作体检，找出设定矛盾、人物动机薄弱、线索断裂、节奏失衡等问题。',
@@ -1344,7 +1347,7 @@ async function analyzeNovel({ titleHint, genreHint, sample, titles }) {
 }
 
 /** AI 续写章节 */
-async function continueChapter({ projectId, chapterId, instruction = '', words = 600 }) {
+async function continueChapter({ projectId, chapterId, instruction = '', words = 600, signal } = {}) {
   const chapter = store.find('chapters', chapterId);
   if (!chapter) throw new Error('章节不存在');
   const ctx = buildContext(projectId);
@@ -1379,7 +1382,8 @@ async function continueChapter({ projectId, chapterId, instruction = '', words =
         ].filter(Boolean).join('\n')
       }
     ],
-    maxTokens: Math.min(4096, Math.round(words * 2.2) + 400)
+    maxTokens: Math.min(4096, Math.round(words * 2.2) + 400),
+    signal
   });
   return { text: json?.choices?.[0]?.message?.content || '', demo: false };
 }
@@ -1410,7 +1414,7 @@ function localMemo(chapter) {
 }
 
 /** 给单章生成记忆点（有模型走模型，无模型走本地压缩） */
-async function memoizeChapter({ chapter }) {
+async function memoizeChapter({ chapter, signal } = {}) {
   const content = String(chapter.content || '').trim();
   if (!content) return '';
   if (!llmEnabled()) return localMemo(chapter);
@@ -1433,7 +1437,8 @@ async function memoizeChapter({ chapter }) {
       }
     ],
     maxTokens: 400,
-    temperature: 0.3
+    temperature: 0.3,
+    signal
   });
   return cleanMemoText(json?.choices?.[0]?.message?.content || '');
 }
@@ -1443,7 +1448,7 @@ async function memoizeChapter({ chapter }) {
  * chapterIds 为空 => 对所有章节；onlyMissing=true 时只补尚未生成记忆点的章节。
  * 单章调用（chapterIds 传一个）便于前端逐章推进、显示进度、可中断。
  */
-async function generateMemos({ projectId, chapterIds, onlyMissing = true }) {
+async function generateMemos({ projectId, chapterIds, onlyMissing = true, signal } = {}) {
   const all = store.byProject('chapters', projectId)
     .slice()
     .sort((a, b) => (a.order || 0) - (b.order || 0));
@@ -1460,7 +1465,7 @@ async function generateMemos({ projectId, chapterIds, onlyMissing = true }) {
   for (const c of targets) {
     if (!String(c.content || '').trim()) { skipped.push({ id: c.id, title: c.title, reason: '暂无正文' }); continue; }
     try {
-      const memo = await memoizeChapter({ chapter: c });
+      const memo = await memoizeChapter({ chapter: c, signal });
       if (memo) {
         store.update('chapters', c.id, { memo });
         updated.push({ id: c.id, title: c.title, memo, order: c.order || 0 });

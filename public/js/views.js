@@ -1,6 +1,6 @@
 'use strict';
 import api from './api.js';
-import { esc, md, openForm, openModal, openConfirm, closeModal, toast, debounce, downloadText, stripBom } from './ui.js';
+import { esc, md, openForm, openModal, openConfirm, closeModal, toast, debounce, downloadText, stripBom, openAiWaiting } from './ui.js';
 import { parseImport } from './importer.js';
 
 const TYPE_ORDER = { act: 0, chapter: 1, scene: 2, beat: 3 };
@@ -223,19 +223,24 @@ export function outline(ctx) {
           ],
           okText: '生成',
           onSubmit: async (v) => {
-            toast('AI 正在构思…');
-            const res = await api.aiGenerate(c.projectId, 'outline', {
-              parentId: parent ? parent.id : null,
-              count: Number(v.count),
-              guidance: v.guidance
-            });
-            aiApplyList(c, res, {
-              title: '生成的大纲节点',
-              render: (it) => `<b>${esc(it.title)}</b><span class="gen-type">${esc(c.meta.typeLabel[it.type] || it.type)}</span><p>${esc(it.summary || '')}</p>`,
-              apply: async (it) => {
-                await c.create('outline', { ...it, parentId: parent ? parent.id : null });
-              }
-            });
+            const { close, signal } = openAiWaiting({ title: 'AI 正在生成大纲…' });
+            try {
+              const res = await api.aiGenerate(c.projectId, 'outline', {
+                parentId: parent ? parent.id : null,
+                count: Number(v.count),
+                guidance: v.guidance
+              }, { signal });
+              aiApplyList(c, res, {
+                title: '生成的大纲节点',
+                render: (it) => `<b>${esc(it.title)}</b><span class="gen-type">${esc(c.meta.typeLabel[it.type] || it.type)}</span><p>${esc(it.summary || '')}</p>`,
+                apply: async (it) => {
+                  await c.create('outline', { ...it, parentId: parent ? parent.id : null });
+                }
+              });
+            } catch (e) {
+              if (!signal.aborted) toast(e.message || '生成失败', 'error');
+              return false;
+            } finally { close(); }
           }
         });
       });
@@ -509,6 +514,8 @@ export function characters(ctx) {
   const list = d.characters.slice().sort((a, b) => {
     const pin = (x) => (x.pinned ? 0 : 1);
     if (pin(a) !== pin(b)) return pin(a) - pin(b);
+    const dn = (x) => (x.done ? 1 : 0);
+    if (dn(a) !== dn(b)) return dn(a) - dn(b);
     return byRecent(a, b);
   });
 
@@ -568,14 +575,18 @@ export function characters(ctx) {
           ],
           okText: '生成',
           onSubmit: async (v) => {
-            toast('AI 正在设计人物…');
-            const res = await api.aiGenerate(c.projectId, 'character', { count: Number(v.count), guidance: v.guidance });
-            aiApplyList(c, res, {
-              title: '生成的角色',
-              render: (it) => `<b>${esc(it.name)}</b><span class="gen-type">${esc(it.role || '未定位')}</span>
-                  <p>${esc(it.personality || '')}</p><p class="gen-muted">动机：${esc(it.motivation || '—')}</p>`,
-              apply: async (it) => { await c.create('characters', it); }
-            });
+            const { close, signal } = openAiWaiting({ title: 'AI 正在设计人物…' });
+            try {
+              const res = await api.aiGenerate(c.projectId, 'character', { count: Number(v.count), guidance: v.guidance }, { signal });
+              aiApplyList(c, res, {
+                title: '生成的角色',
+                render: (it) => `<b>${esc(it.name)}</b><span class="gen-type">${esc(it.role || '未定位')}</span>
+                    <p>${esc(it.personality || '')}</p><p class="gen-muted">动机：${esc(it.motivation || '—')}</p>`,
+                apply: async (it) => { await c.create('characters', it); }
+              });
+            } finally {
+              close();
+            }
           }
         });
       });
@@ -598,6 +609,7 @@ export function characters(ctx) {
       root.querySelectorAll('.char-card').forEach((el) => {
         el.addEventListener('click', (e) => {
           if (e.target.closest('[data-pin]')) return; // 置顶按钮自己处理
+          if (e.target.closest('[data-done]')) return; // 已完成按钮自己处理
           openCharacter(c, el.dataset.id);
         });
       });
@@ -608,6 +620,13 @@ export function characters(ctx) {
         const ch = d.characters.find((x) => x.id === id);
         if (!ch) return;
         await c.patch('characters', id, { pinned: !ch.pinned }); // patch 默认会 reload + 重绘
+      }));
+      root.querySelectorAll('[data-done]').forEach((b) => b.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = b.dataset.done;
+        const ch = d.characters.find((x) => x.id === id);
+        if (!ch) return;
+        await c.patch('characters', id, { done: !ch.done });
       }));
 
       // 关系图：点击节点聚焦其关系网（再点同一节点取消聚焦）
@@ -647,8 +666,11 @@ function characterFields() {
 function charCard(c, d) {
   const rels = d.relations.filter((r) => r.fromId === c.id || r.toId === c.id).length;
   return `
-    <article class="char-card${c.pinned ? ' pinned' : ''}" data-id="${c.id}">
-      <button class="pin-btn${c.pinned ? ' on' : ''}" data-pin="${c.id}" title="${c.pinned ? '取消置顶' : '置顶'}" aria-label="置顶">📌</button>
+    <article class="char-card${c.pinned ? ' pinned' : ''}${c.done ? ' done-item' : ''}" data-id="${c.id}">
+      <span class="char-card-btns">
+        <button class="pin-btn${c.pinned ? ' on' : ''}" data-pin="${c.id}" title="${c.pinned ? '取消置顶' : '置顶'}" aria-label="置顶">📌</button>
+        <button class="done-btn${c.done ? ' on' : ''}" data-done="${c.id}" title="${c.done ? '标记未完成' : '标记已完成'}" aria-label="已完成">✓</button>
+      </span>
       <header>
         <span class="avatar" style="background:${esc(c.color || '#6b8afd')}">${esc((c.name || '?').slice(0, 1))}</span>
         <div class="char-head-text">
@@ -661,6 +683,7 @@ function charCard(c, d) {
         ${c.arc ? `<span title="弧光">↗ ${esc(c.arc.slice(0, 18))}</span>` : ''}
         <span title="关系数">🔗 ${rels}</span>
         ${c.pinned ? '<span class="pin-tag">📌 置顶</span>' : ''}
+        ${c.done ? '<span class="done-tag">✓ 已完成</span>' : ''}
       </footer>
     </article>`;
 }
@@ -1164,6 +1187,8 @@ export function lines(ctx) {
   const ordered = d.lines.slice().sort((a, b) => {
     const pin = (x) => (x.pinned ? 0 : 1);
     if (pin(a) !== pin(b)) return pin(a) - pin(b);
+    const dn = (x) => (x.done ? 1 : 0);
+    if (dn(a) !== dn(b)) return dn(a) - dn(b);
     return byRecent(a, b);
   });
 
@@ -1202,6 +1227,11 @@ export function lines(ctx) {
         const line = c.data.lines.find((l) => l.id === b.dataset.pinLine);
         if (!line) return;
         await c.patch('lines', line.id, { pinned: !line.pinned }); // patch 默认 reload + 重绘
+      }));
+      root.querySelectorAll('[data-act="done-line"]').forEach((b) => b.addEventListener('click', async () => {
+        const line = c.data.lines.find((l) => l.id === b.dataset.doneLine);
+        if (!line) return;
+        await c.patch('lines', line.id, { done: !line.done });
       }));
       root.querySelectorAll('[data-act="edit-line"]').forEach((b) => b.addEventListener('click', () => {
         openLineForm(c.data.lines.find((l) => l.id === b.dataset.editLine));
@@ -1263,18 +1293,22 @@ export function lines(ctx) {
           fields: [{ key: 'guidance', label: '侧重方向（可选）', type: 'textarea', rows: 3, placeholder: '例如：想突出复仇线与救赎线的对立' }],
           okText: '生成',
           onSubmit: async (v) => {
-            toast('AI 正在梳理…');
-            const res = await api.aiGenerate(c.projectId, 'plot', { guidance: v.guidance });
-            aiApplyList(c, res, {
-              title: '生成的线路',
-              render: (it) => `<b>${esc(it.name)}</b><span class="gen-type">${esc(c.meta.lineLabel[it.kind] || it.kind)}</span>
-                  <p>${esc(it.description || '')}</p>
-                  <ol class="gen-beats">${(it.beats || []).map((b2) => `<li>${esc(b2.title)}</li>`).join('')}</ol>`,
-              apply: async (it) => {
-                const line = await c.create('lines', { name: it.name, kind: it.kind, description: it.description });
-                for (const b2 of it.beats || []) await c.create('beats', { ...b2, lineId: line.id });
-              }
-            });
+            const { close, signal } = openAiWaiting({ title: 'AI 正在梳理…' });
+            try {
+              const res = await api.aiGenerate(c.projectId, 'plot', { guidance: v.guidance }, { signal });
+              aiApplyList(c, res, {
+                title: '生成的线路',
+                render: (it) => `<b>${esc(it.name)}</b><span class="gen-type">${esc(c.meta.lineLabel[it.kind] || it.kind)}</span>
+                    <p>${esc(it.description || '')}</p>
+                    <ol class="gen-beats">${(it.beats || []).map((b2) => `<li>${esc(b2.title)}</li>`).join('')}</ol>`,
+                apply: async (it) => {
+                  const line = await c.create('lines', { name: it.name, kind: it.kind, description: it.description });
+                  for (const b2 of it.beats || []) await c.create('beats', { ...b2, lineId: line.id });
+                }
+              });
+            } finally {
+              close();
+            }
           }
         });
       });
@@ -1285,7 +1319,7 @@ export function lines(ctx) {
 function laneHtml(l, d, ctx) {
   const beats = d.beats.filter((b) => b.lineId === l.id).sort(byOrder);
   return `
-    <div class="lane ${l.kind === 'main' ? 'is-main' : ''}" style="--lane:${esc(l.color || '#6b8afd')}">
+    <div class="lane ${l.kind === 'main' ? 'is-main' : ''}${l.done ? ' is-done' : ''}" style="--lane:${esc(l.color || '#6b8afd')}">
       <div class="lane-head">
         <div class="lane-title">
           <span class="kind-badge k-${esc(l.kind)}">${esc(ctx.meta.lineLabel[l.kind] || l.kind)}</span>
@@ -1294,6 +1328,7 @@ function laneHtml(l, d, ctx) {
         <p class="lane-desc">${esc(l.description || '（暂无说明）')}</p>
         <div class="lane-acts">
           <button class="btn ghost xs${l.pinned ? ' lane-pinned' : ''}" data-act="pin-line" data-pin-line="${l.id}" title="${l.pinned ? '取消置顶' : '置顶'}">📌 ${l.pinned ? '已置顶' : '置顶'}</button>
+          <button class="btn ghost xs${l.done ? ' lane-done' : ''}" data-act="done-line" data-done-line="${l.id}" title="${l.done ? '标记未完成' : '标记已完成'}">${l.done ? '✓ 已完成' : '标记完成'}</button>
           <button class="btn ghost xs" data-act="edit-line" data-edit-line="${l.id}">编辑</button>
           <button class="btn ghost xs" data-act="del-line" data-del-line="${l.id}">删除</button>
         </div>
@@ -1512,14 +1547,10 @@ export function chapters(ctx) {
           ],
           okText: '开始续写',
           onSubmit: async (v) => {
-            const m = openModal({
-              title: '正在续写…', width: 620,
-              html: `<div class="loading-block"><div class="spinner"></div><p>助手正在读上下文并动笔</p></div>`,
-              footer: false
-            });
+            const { close: cwClose, signal: cwSignal } = openAiWaiting({ title: 'AI 正在续写…' });
             try {
-              const res = await api.aiContinue(c.projectId, cur.id, v.instruction, Number(v.words));
-              m.close();
+              const res = await api.aiContinue(c.projectId, cur.id, v.instruction, Number(v.words), { signal: cwSignal });
+              cwClose();
               const sep = contentEl.value && !contentEl.value.endsWith('\n') ? '\n\n' : '';
               openModal({
                 title: '续写结果', subtitle: `约 ${(res.text || '').length} 字`, width: 640,
@@ -1534,7 +1565,7 @@ export function chapters(ctx) {
                 ]
               });
             } catch (err) {
-              m.close();
+              cwClose();
               toast(err.message, 'error');
             }
           }
@@ -1600,7 +1631,14 @@ const WORLD_CATS = ['地理', '历史', '规则', '势力', '物品', '习俗', 
 export function world(ctx) {
   const d = ctx.data;
   const groups = {};
-  d.world.slice().sort(byRecent).forEach((w) => { (groups[w.category || '其他'] ||= []).push(w); });
+  const wsort = (a, b) => {
+    const pin = (x) => (x.pinned ? 0 : 1);
+    if (pin(a) !== pin(b)) return pin(a) - pin(b);
+    const dn = (x) => (x.done ? 1 : 0);
+    if (dn(a) !== dn(b)) return dn(a) - dn(b);
+    return byRecent(a, b);
+  };
+  d.world.slice().sort(wsort).forEach((w) => { (groups[w.category || '其他'] ||= []).push(w); });
   const cats = Object.keys(groups);
 
   return {
@@ -1616,10 +1654,12 @@ export function world(ctx) {
               <h4>${esc(cat)} <span class="chip-count">${groups[cat].length}</span></h4>
               <div class="card-grid">
                 ${groups[cat].map((w) => `
-                  <article class="mini-card" data-id="${w.id}">
+                  <article class="mini-card${w.pinned ? ' pinned' : ''}${w.done ? ' done-item' : ''}" data-id="${w.id}">
                     <b>${esc(w.title)}</b>
                     <p>${esc((w.content || '').slice(0, 90))}${(w.content || '').length > 90 ? '…' : ''}</p>
                     <div class="mini-card-acts">
+                      <button data-act="pin" data-id="${w.id}" title="${w.pinned ? '取消置顶' : '置顶'}">${w.pinned ? '📌 已置顶' : '📌 置顶'}</button>
+                      <button data-act="done" data-id="${w.id}" title="${w.done ? '标记未完成' : '标记已完成'}">${w.done ? '✓ 已完成' : '标记完成'}</button>
                       <button data-act="edit" data-id="${w.id}">编辑</button>
                       <button data-act="del" data-id="${w.id}">删除</button>
                     </div>
@@ -1659,6 +1699,18 @@ export function world(ctx) {
         await c.remove('world', b.dataset.id);
         toast('已删除', 'success');
       }));
+      root.querySelectorAll('[data-act="pin"]').forEach((b) => b.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const w = c.data.world.find((x) => x.id === b.dataset.id);
+        if (!w) return;
+        await c.patch('world', w.id, { pinned: !w.pinned });
+      }));
+      root.querySelectorAll('[data-act="done"]').forEach((b) => b.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const w = c.data.world.find((x) => x.id === b.dataset.id);
+        if (!w) return;
+        await c.patch('world', w.id, { done: !w.done });
+      }));
 
       root.querySelector('[data-act="ai"]').addEventListener('click', () => {
         openForm({
@@ -1669,13 +1721,17 @@ export function world(ctx) {
           ],
           okText: '生成',
           onSubmit: async (v) => {
-            toast('AI 正在构建世界…');
-            const res = await api.aiGenerate(c.projectId, 'world', { count: Number(v.count), guidance: v.guidance });
-            aiApplyList(c, res, {
-              title: '生成的设定',
-              render: (it) => `<b>${esc(it.title)}</b><span class="gen-type">${esc(it.category)}</span><p>${esc(it.content || '')}</p>`,
-              apply: async (it) => { await c.create('world', it); }
-            });
+            const { close, signal } = openAiWaiting({ title: 'AI 正在构建世界…' });
+            try {
+              const res = await api.aiGenerate(c.projectId, 'world', { count: Number(v.count), guidance: v.guidance }, { signal });
+              aiApplyList(c, res, {
+                title: '生成的设定',
+                render: (it) => `<b>${esc(it.title)}</b><span class="gen-type">${esc(it.category)}</span><p>${esc(it.content || '')}</p>`,
+                apply: async (it) => { await c.create('world', it); }
+              });
+            } finally {
+              close();
+            }
           }
         });
       });
@@ -1770,7 +1826,13 @@ const NOTE_CATS = ['灵感', '备忘', '待解决', '设定'];
 
 export function notes(ctx) {
   const d = ctx.data;
-  const list = d.notes.slice().sort((a, b) => ((b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)) || byRecent(a, b));
+  const list = d.notes.slice().sort((a, b) => {
+    const pin = (x) => (x.pinned ? 0 : 1);
+    if (pin(a) !== pin(b)) return pin(a) - pin(b);
+    const dn = (x) => (x.done ? 1 : 0);
+    if (dn(a) !== dn(b)) return dn(a) - dn(b);
+    return byRecent(a, b);
+  });
 
   return {
     html: `
@@ -1781,10 +1843,13 @@ export function notes(ctx) {
     )}
         ${list.length
         ? `<div class="note-grid">${list.map((n) => `
-            <article class="note-card cat-${esc(n.category || '备忘')}" data-id="${n.id}">
+            <article class="note-card cat-${esc(n.category || '备忘')}${n.done ? ' done-item' : ''}" data-id="${n.id}">
               <header>
                 <span class="cat-tag">${esc(n.category || '备忘')}</span>
-                <button class="icon-btn ${n.pinned ? 'pinned' : ''}" data-act="pin" data-id="${n.id}" title="置顶">${n.pinned ? '★' : '☆'}</button>
+                <span class="note-head-acts">
+                  <button class="icon-btn ${n.pinned ? 'pinned' : ''}" data-act="pin" data-id="${n.id}" title="置顶">${n.pinned ? '★' : '☆'}</button>
+                  <button class="icon-btn ${n.done ? 'on' : ''}" data-act="done" data-id="${n.id}" title="${n.done ? '标记未完成' : '标记已完成'}">${n.done ? '✓' : ''}</button>
+                </span>
               </header>
               <b>${esc(n.title)}</b>
               ${n.content ? `<p class="note-brief">${esc(n.content)}</p>` : ''}
@@ -1840,6 +1905,12 @@ export function notes(ctx) {
         const n = c.data.notes.find((x) => x.id === b.dataset.id);
         await c.patch('notes', n.id, { pinned: !n.pinned });
       }));
+      root.querySelectorAll('[data-act="done"]').forEach((b) => b.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const n = c.data.notes.find((x) => x.id === b.dataset.id);
+        if (!n) return;
+        await c.patch('notes', n.id, { done: !n.done });
+      }));
 
       root.querySelector('[data-act="brainstorm"]').addEventListener('click', () => {
         openForm({
@@ -1850,13 +1921,17 @@ export function notes(ctx) {
           ],
           okText: '开脑暴',
           onSubmit: async (v) => {
-            toast('AI 正在发散…');
-            const res = await api.aiGenerate(c.projectId, 'brainstorm', { topic: v.topic, count: Number(v.count) });
-            aiApplyList(c, res, {
-              title: '脑暴结果',
-              render: (it) => `<b>${esc(it.title)}</b><p>${esc(it.detail || '')}</p>${it.risk ? `<p class="gen-muted">风险：${esc(it.risk)}</p>` : ''}`,
-              apply: async (it) => { await c.create('notes', { title: it.title, content: `${it.detail || ''}\n\n风险提示：${it.risk || '—'}`, category: '灵感' }); }
-            });
+            const { close, signal } = openAiWaiting({ title: 'AI 正在发散…' });
+            try {
+              const res = await api.aiGenerate(c.projectId, 'brainstorm', { topic: v.topic, count: Number(v.count) }, { signal });
+              aiApplyList(c, res, {
+                title: '脑暴结果',
+                render: (it) => `<b>${esc(it.title)}</b><p>${esc(it.detail || '')}</p>${it.risk ? `<p class="gen-muted">风险：${esc(it.risk)}</p>` : ''}`,
+                apply: async (it) => { await c.create('notes', { title: it.title, content: `${it.detail || ''}\n\n风险提示：${it.risk || '—'}`, category: '灵感' }); }
+              });
+            } finally {
+              close();
+            }
           }
         });
       });
@@ -2280,6 +2355,7 @@ export function memos(ctx) {
       const stopBtn = root.querySelector('#memoStop');
       let stopFlag = false;
       let running = false;
+      let ac = null;
 
       const showProg = () => { prog.hidden = false; };
       const hideProg = () => { prog.hidden = true; bar.style.width = '0%'; };
@@ -2305,14 +2381,14 @@ export function memos(ctx) {
 
       async function runBatch(ids) {
         if (running || !ids.length) return;
-        running = true; stopFlag = false;
+        running = true; stopFlag = false; ac = new AbortController();
         showProg();
         let ok = 0; let fail = 0;
         for (let i = 0; i < ids.length; i++) {
           if (stopFlag) break;
           setProg(i, ids.length, `正在生成 ${i + 1} / ${ids.length}…`);
           try {
-            const res = await api.aiMemos(c.projectId, { chapterIds: [ids[i]], onlyMissing: false });
+            const res = await api.aiMemos(c.projectId, { chapterIds: [ids[i]], onlyMissing: false }, { signal: ac.signal });
             const up = (res.updated && res.updated[0]) || null;
             if (up) { ok += 1; applyToDom(up.id, up.memo || ''); } else { fail += 1; }
           } catch (_) { fail += 1; }
@@ -2325,15 +2401,16 @@ export function memos(ctx) {
         else toast(`生成完成：成功 ${ok} 章${fail ? `，失败 ${fail} 章` : ''}`, fail && !ok ? 'error' : 'success');
       }
 
-      if (stopBtn) stopBtn.addEventListener('click', () => { stopFlag = true; });
+      if (stopBtn) stopBtn.addEventListener('click', () => { stopFlag = true; if (ac) ac.abort(); });
 
       root.querySelectorAll('[data-act="gen-one"]').forEach((b) => b.addEventListener('click', async () => {
         const row = b.closest('.memo-row');
         const id = row.dataset.id;
         const old = b.textContent;
         b.disabled = true; b.textContent = '生成中…';
+        ac = new AbortController();
         try {
-          const res = await api.aiMemos(c.projectId, { chapterIds: [id], onlyMissing: false });
+          const res = await api.aiMemos(c.projectId, { chapterIds: [id], onlyMissing: false }, { signal: ac.signal });
           const up = (res.updated && res.updated[0]) || null;
           if (up) { applyToDom(id, up.memo || ''); c.syncLocal(); toast('已生成', 'success'); }
           else toast('该章暂无正文，无法生成', 'error');

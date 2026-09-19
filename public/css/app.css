@@ -652,8 +652,8 @@ body.writing-full .editor-content {
 .note-card.cat-待解决 { border-left-color: #e05252; }
 .note-card.cat-设定 { border-left-color: #6d4bf0; }
 .note-card.cat-备忘 { border-left-color: #7c8aa0; }
-.note-card header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-.cat-tag { font-size: 11px; color: var(--muted); }
+.note-card header { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.cat-tag { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .note-card b { display: block; font-size: 13.5px; margin-bottom: 5px; }
 .note-card p { margin: 0 0 10px; font-size: 12.5px; color: var(--text-2); line-height: 1.7; white-space: pre-wrap; }
 .note-card footer { display: flex; gap: 12px; }
@@ -673,10 +673,13 @@ body.writing-full .editor-content {
 .is-done { opacity: .62; border-left-style: dashed !important; }
 .lane.is-done { border-left-color: var(--muted) !important; }
 
-/* 笔记头部：置顶 / 已完成 按钮并排。默认常显、带文字，避免"只有图标、看不见按钮" */
-.note-head-acts { display: flex; gap: 4px; }
+/* 笔记头部：置顶 / 已完成 按钮并排。默认常显、带文字，避免"只有图标、看不见按钮"。
+   注意：.icon-btn 基类是 26×26 的方格（给弹窗关闭、面板工具条等纯图标按钮用的），
+   这里带文字必须把 width/height/display 一起覆盖掉，否则文字会溢出格子、两个按钮叠在一起。 */
+.note-head-acts { display: flex; gap: 4px; flex: 0 0 auto; }
 .note-head-acts .icon-btn {
-  font-size: 11.5px; padding: 3px 7px; border-radius: 5px; opacity: 1; line-height: 1.3;
+  width: auto; height: auto; display: inline-flex; align-items: center; gap: 3px;
+  font-size: 11.5px; padding: 3px 7px; border-radius: 6px; opacity: 1; line-height: 1.3;
   background: var(--surface-2); border: 1px solid var(--border); cursor: pointer; color: var(--muted);
   white-space: nowrap; transition: color .15s, border-color .15s, background .15s;
 }
@@ -688,11 +691,11 @@ body.writing-full .editor-content {
    所以改为卡片内正常流式的一行，常显、带文字，一眼能看出是可点的按钮） */
 .char-card-btns { display: flex; gap: 6px; margin: 0 0 10px; }
 .char-card-btns .pin-btn, .char-card-btns .done-btn {
-  position: static; opacity: 1; padding: 3px 8px; border-radius: 6px; cursor: pointer;
-  border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  position: static; opacity: 1; padding: 3px 7px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--muted);
   font-size: 11.5px; line-height: 1.3; white-space: nowrap; transition: color .15s, border-color .15s, background .15s;
 }
-.char-card-btns .pin-btn:hover, .char-card-btns .done-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--surface-2); }
+.char-card-btns .pin-btn:hover, .char-card-btns .done-btn:hover { color: var(--accent); border-color: var(--accent); }
 .char-card-btns .pin-btn.on { color: #b8860b; border-color: rgba(224,165,46,.55); background: rgba(224,165,46,.12); }
 .char-card-btns .done-btn.on { color: var(--green); border-color: rgba(43,160,90,.55); background: rgba(43,160,90,.12); }
 

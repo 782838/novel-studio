@@ -1463,6 +1463,8 @@ async function generateMemos({ projectId, chapterIds, onlyMissing = true, signal
   const updated = [];
   const skipped = [];
   for (const c of targets) {
+    // 作者点了「停止」：立刻收工，别再对剩下的章节空跑一轮（每章都会瞬间失败）
+    if (signal && signal.aborted) break;
     if (!String(c.content || '').trim()) { skipped.push({ id: c.id, title: c.title, reason: '暂无正文' }); continue; }
     try {
       const memo = await memoizeChapter({ chapter: c, signal });

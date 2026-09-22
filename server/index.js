@@ -110,12 +110,19 @@ const fail = (res, err, code = 400) => send(res, code, { error: String(err && er
 
 /**
  * 客户端停止信号：前端点「停止」会 abort 这次 fetch，触发底层 TCP 连接关闭，
- * 这里监听 req 的 close 事件，把断开转成 AbortController，传给 AI 调用——
+ * 这里把断开转成 AbortController，传给 AI 调用——
  * 这样服务端正在无限重试的请求能在用户点停止时立刻中止（与聊天助手机制一致）。
+ *
+ * 坑（已实测）：**不能用 req.on('close') 判断客户端断开**。Node 新版里
+ * IncomingMessage 的 'close' 在「请求体接收完」时就触发（实测约 1ms 内），
+ * 跟客户端断不断开无关；而路由是在 await 读完 body 之后才执行的，等这里挂上监听，
+ * 那次事件早就过去了——于是这行监听永远不触发，等于死代码。
+ * 真正表示「连接断了」的是响应侧的 'close'；再用 writableEnded 排除掉
+ * 「响应已经正常写完」这种并非断开的情况。
  */
-function clientSignal(req) {
+function clientSignal(req, res) {
   const ctrl = new AbortController();
-  req.on('close', () => ctrl.abort());
+  res.on('close', () => { if (!res.writableEnded) ctrl.abort(); });
   return ctrl.signal;
 }
 
@@ -854,9 +861,13 @@ on('POST', '/api/ai/chat/stream', async ({ req, res, body }) => {
 
   const ctrl = new AbortController();
   let clientGone = false;
-  const onClose = () => { clientGone = true; ctrl.abort(); };
-  // 客户端点「停止」会直接断开连接：req/res 都要听（req 的 close 在响应结束前不一定触发）
-  req.on('close', onClose);
+  const onClose = () => {
+    // 响应已经正常写完就不算断开（正常结束也会触发 res 的 close）
+    if (res.writableEnded) return;
+    clientGone = true;
+    ctrl.abort();
+  };
+  // 只听响应侧：req 的 close 在 Node 新版里是「请求体收完」就触发，判断不了客户端断开
   res.on('close', onClose);
 
   let partial = '';
@@ -897,7 +908,6 @@ on('POST', '/api/ai/chat/stream', async ({ req, res, body }) => {
     write({ type: stopped ? 'stopped' : 'error', message: reply, ops: stopped ? doneOps : [], latency: Date.now() - t0 });
   } finally {
     clearInterval(beat);
-    if (req.off) req.off('close', onClose);
     if (res.off) res.off('close', onClose);
     try { res.end(); } catch (_) { /* ignore */ }
   }
@@ -906,7 +916,7 @@ on('POST', '/api/ai/chat/stream', async ({ req, res, body }) => {
 on('POST', '/api/ai/generate', async ({ req, res, body }) => {
   const { projectId, kind, params } = body;
   if (!projectId) return fail(res, '缺少 projectId');
-  const signal = clientSignal(req);
+  const signal = clientSignal(req, res);
   const result = await ai.generate({ projectId, kind, params: params || {}, signal });
   ok(res, result);
 });
@@ -914,7 +924,7 @@ on('POST', '/api/ai/generate', async ({ req, res, body }) => {
 on('POST', '/api/ai/continue', async ({ req, res, body }) => {
   const { projectId, chapterId, instruction, words } = body;
   if (!chapterId) return fail(res, '缺少 chapterId');
-  const signal = clientSignal(req);
+  const signal = clientSignal(req, res);
   const result = await ai.continueChapter({ projectId, chapterId, instruction: instruction || '', words: words || 600, signal });
   ok(res, result);
 });
@@ -924,7 +934,7 @@ on('POST', '/api/ai/continue', async ({ req, res, body }) => {
 on('POST', '/api/ai/memos', async ({ req, res, body }) => {
   const { projectId, chapterIds, onlyMissing } = body;
   if (!projectId) return fail(res, '缺少 projectId');
-  const signal = clientSignal(req);
+  const signal = clientSignal(req, res);
   try {
     const ids = Array.isArray(chapterIds) ? chapterIds : (chapterIds ? [chapterIds] : null);
     const result = await ai.generateMemos({ projectId, chapterIds: ids, onlyMissing: onlyMissing !== false, signal });

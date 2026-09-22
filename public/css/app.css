@@ -1014,6 +1014,16 @@ body.agent-open .agent-panel { width: 396px; flex-basis: 396px; border-left-colo
 .bubble:hover .bubble-copy { opacity: 1; }
 .bubble-copy:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .bubble-copy.done { color: #2f6b4f; border-color: #cfe8db; background: #eaf6ef; opacity: 1; }
+
+/* 气泡底部的复制按钮：长回答不必再滑回顶部去找复制。
+   常态半透明可见（就停在阅读结束的位置），悬停加深。 */
+.bubble-acts {
+  display: flex; justify-content: flex-end; gap: 6px;
+  margin-top: 9px; padding-top: 6px; border-top: 1px dashed var(--border);
+}
+.bubble-acts .bubble-copy { opacity: .5; align-self: center; margin-top: 0; }
+.bubble:hover .bubble-acts .bubble-copy { opacity: 1; }
+.bubble-acts .bubble-copy.done { opacity: 1; }
 .live-foot {
   display: flex; align-items: center; gap: 7px; margin-top: 8px; padding-top: 6px;
   border-top: 1px dashed var(--border); font-size: 11px; color: var(--muted);

@@ -68,7 +68,23 @@ export function toast(message, kind = 'info', ms = 2600) {
 }
 
 /* ---------------- 极简 Markdown ---------------- */
+/* 结果缓存：助手面板重绘时要重新渲染全部历史消息，没有缓存就得把整段对话
+   反复重新解析一遍——这是长对话下卡顿的主要开销之一。 */
+const MD_CACHE = new Map();
+const MD_CACHE_MAX = 240;
+
 export function md(src) {
+  if (!src) return '';
+  const key = String(src);
+  const hit = MD_CACHE.get(key);
+  if (hit !== undefined) return hit;
+  const html = mdRender(key);
+  if (MD_CACHE.size >= MD_CACHE_MAX) MD_CACHE.clear();
+  MD_CACHE.set(key, html);
+  return html;
+}
+
+function mdRender(src) {
   if (!src) return '';
   const lines = String(src).replace(/\r\n/g, '\n').split('\n');
   const out = [];

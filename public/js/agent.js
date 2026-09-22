@@ -33,6 +33,11 @@ export function createAgent(ctx) {
   let pendingTimer = null;
   let live = null;          // 流式中的现场（思考过程 / 正文 / 已执行操作）
   let lastPaint = 0;
+  let paintTimer = null;    // 节流期间挂起的一次补绘：保证「最后一次更新」一定能画出来
+  let liveThinkTop = 0;     // 用户手动上翻「思考过程」时停留的位置
+  let staticSig = '';       // 静态区（历史消息 + 任务卡）的渲染签名：没变就直接跳过重建
+  let dataRef = null;       // reload() 会整体换掉 data 对象引用，用它当「数据变了」的信号
+  let dataVer = 0;
   // 「其它 AI 功能」（生成记忆点、续写、生成大纲/角色/线路/设定/脑暴）的执行记录。
   // 这类任务不是对话，不写服务端 messages，只在本机内存里按时间并入对话流显示，
   // 这样点「全部生成」之后会像跟助手对话一样：自动打开面板 → 显示正在做什么 → 末尾汇报条数。
@@ -51,6 +56,12 @@ export function createAgent(ctx) {
   }
 
   const secs = (ms) => (ms / 1000).toFixed(1);
+
+  /** 取字符串末尾 n 个字符（超长时前面补省略号）：实时只画尾巴，避免每帧重排几十 KB */
+  const tail = (s, n) => {
+    const t = String(s == null ? '' : s);
+    return t.length > n ? `…\n${t.slice(-n)}` : t;
+  };
 
   /**
    * 助手「思考过程」折叠块——实时与历史消息共用。
@@ -103,7 +114,12 @@ export function createAgent(ctx) {
     </div>`;
   }
 
-  function msgsHtml() {
+  /**
+   * 静态区 HTML = 已完成的历史消息 + AI 任务卡 + 正在等待的那条提问。
+   * 它只有在数据真的变了（reload / 任务状态推进）时才重建；
+   * 流式生成期间只重绘「实时区」的那一个气泡。
+   */
+  function staticHtml() {
     const msgs = ctx.data.messages || [];
     // 作者刚发出、服务端还在处理的那条问题——必须立刻显示，否则看起来像"被吞了"
     const mine = pendingText
@@ -120,7 +136,20 @@ export function createAgent(ctx) {
     const timeline = msgs.map((m, i) => ({ at: m.createdAt || 0, html: () => bubble(m, i) }));
     tasks.forEach((t) => timeline.push({ at: t.startedAt || 0, html: () => taskHtml(t) }));
     timeline.sort((a, b) => a.at - b.at);
-    return timeline.map((x) => x.html()).join('') + mine + liveHtml();
+    return timeline.map((x) => x.html()).join('') + mine;
+  }
+
+  /**
+   * 静态区的渲染签名。刻意做得极轻：消息只可能被 reload() 整体替换（引用变化即算变），
+   * 任务卡则看它的可见状态字段。这样每帧比较签名的开销是 O(任务数)，
+   * 而不是把整段对话（含全部 markdown）重新拼一遍——这正是原来卡顿的根源。
+   */
+  function staticSigOf() {
+    const d = ctx.data;
+    if (d !== dataRef) { dataRef = d; dataVer++; }
+    return `${dataVer}|${pendingText || ''}|${tasks.map((t) =>
+      `${t.id}:${t.status}:${t.done}:${t.items.length}:${t.notes.length}:${(t.detail || '').length}:${(t.summary || '').length}:${(t.error || '').length}`
+    ).join(',')}`;
   }
 
   function liveHtml() {
@@ -134,20 +163,24 @@ export function createAgent(ctx) {
       : '';
     const answer = live.answer ? `<div class="live-answer" id="liveAnswer">${esc(live.answer)}</div>` : '';
     const idle = !live.thinking && !live.answer && !live.notes.length;
-    const copy = live.answer
+    const copyTop = live.answer
       ? `<button class="bubble-copy" data-copy-mode="live" title="复制正在生成的回答">复制</button>` : '';
+    // 正在生成的回答很长时，底部也要有一个「复制」，否则作者得滑回顶部才点得到
+    const copyBottom = live.answer
+      ? `<div class="bubble-acts"><button class="bubble-copy inline" data-copy-mode="live" title="复制正在生成的回答">复制</button></div>` : '';
     return `<div class="bubble assistant">
       <div class="bubble-avatar">✦</div>
       <div class="bubble-body">
-        ${thinkBlock(live.thinking, live.thinkMs, true, 'live')}
+        ${thinkBlock(tail(live.thinking, 8000), live.thinkMs, true, 'live')}
         ${idle ? `<div class="live-status"><span class="dot-typing"><i></i><i></i><i></i></span><em>正在读取项目数据并思考…</em></div>` : ''}
         ${notes}
         ${ops}
         ${answer}
         <div class="live-foot"><span class="dot-typing sm"><i></i><i></i><i></i></span>已等待 <b id="liveWaited">${waited}</b> 秒 · 可随时点「停止」
         </div>
+        ${copyBottom}
       </div>
-      ${copy}
+      ${copyTop}
     </div>`;
   }
 
@@ -158,12 +191,15 @@ export function createAgent(ctx) {
     const meta = [];
     if (m.thinkMs) meta.push(`思考 ${secs(m.thinkMs)} 秒`);
     if (m.latency) meta.push(`用时 ${secs(m.latency)} 秒`);
+    // 助手回答常常很长，底部再放一个「复制」，省得为了复制滑回消息顶部
+    const copyBottom = `<div class="bubble-acts"><button class="bubble-copy inline" data-copy-mode="msg" data-idx="${idx}" title="复制这条消息">复制</button></div>`;
     return `<div class="bubble assistant">
       <div class="bubble-avatar">✦</div>
       <div class="bubble-body">
         ${thinkBlock(m.thinking, m.thinkMs, false, `m${idx}`)}
         ${md(m.content)}${opsHtml(m.ops)}
         ${meta.length ? `<div class="bubble-meta">${meta.join(' · ')}</div>` : ''}
+        ${copyBottom}
       </div>
       ${copy}
     </div>`;
@@ -258,7 +294,10 @@ export function createAgent(ctx) {
           <button class="icon-btn" data-act="close" title="收起面板">›</button>
         </div>
       </div>
-      <div class="agent-msgs" id="agentMsgs"></div>
+      <div class="agent-msgs" id="agentMsgs">
+        <div id="agentStatic"></div>
+        <div id="agentLiveHost"></div>
+      </div>
       <div class="agent-quick" id="agentQuick">
         ${QUICK.map((q) => `<button class="quick-chip" data-q="${esc(q)}">${esc(q)}</button>`).join('')}
       </div>
@@ -294,6 +333,11 @@ export function createAgent(ctx) {
       toast('已清空', 'success');
     });
     document.addEventListener('keydown', onShortcut);
+    // 窗口一转到后台就停止渲染（流式事件照常累积），回到前台再补画一次。
+    // 这是「提问后把软件转入后台就特别容易卡」的直接对策：后台不再产生任何重排/重绘。
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) { lastPaint = 0; paint(); }
+    });
   }
 
   /** 按钮在「发送 / 停止」之间切换 */
@@ -311,36 +355,67 @@ export function createAgent(ctx) {
     const st = root.querySelector('#aiStatus');
     if (st) st.outerHTML = statusHtml();
     const box = root.querySelector('#agentMsgs');
-    // 重绘会重建 #agentMsgs 的整个 DOM，内部滚动位置随之归零——
-    // 用户读「思考过程」或往上翻历史时，就表现为"一滚动就被弹回顶部"。
-    // 这里在重绘前记下主列表与每个思考块（按 data-think 键）的 scrollTop，重绘后还原。
+    // 主列表只在「静态区」重建时才可能被重置滚动：重绘前后记录并还原；
+    // 贴着底部的照旧跟到底，用户手动上翻过就停在原处，不要抢回顶部。
     const prevTop = box.scrollTop;
     const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 140;
+    renderStatic();
+    renderLive();
+    box.scrollTop = nearBottom ? box.scrollHeight : prevTop;
+    syncSend();
+    ensureTicker();
+  }
+
+  /**
+   * 静态区：历史消息 + 任务卡 + 待发提问。
+   * 只有签名变化时才重建——流式生成期间它一次都不会动，
+   * 于是「每收到一小段就重排整段对话」的开销被彻底消掉（这是卡顿的根因）。
+   */
+  function renderStatic() {
+    const sig = staticSigOf();
+    if (sig === staticSig) return;
+    staticSig = sig;
+    const host = root.querySelector('#agentStatic');
+    if (!host) return;
+    // 重建前记下各思考块的滚动位置与展开态（结构一致，按 data-think 键还原）
     const savedThink = {};
     const savedOpen = new Set();
-    box.querySelectorAll('.think-body[data-think]').forEach((el) => {
+    host.querySelectorAll('.think-body[data-think]').forEach((el) => {
       if (el.scrollTop) savedThink[el.dataset.think] = el.scrollTop;
-      if (el.closest('details.think') && el.closest('details.think').open) savedOpen.add(el.dataset.think);
+      const det = el.closest('details.think');
+      if (det && det.open) savedOpen.add(el.dataset.think);
     });
-    box.innerHTML = msgsHtml();
-    box.querySelectorAll('.think-body[data-think]').forEach((el) => {
+    host.innerHTML = staticHtml();
+    host.querySelectorAll('.think-body[data-think]').forEach((el) => {
       const key = el.dataset.think;
       const det = el.closest('details.think');
       if (det && savedOpen.has(key)) det.open = true;   // 展开态别被重绘吃掉
-      if (key === 'live') {
-        // 正在生成的思考块：跟随态就贴底看最新，用户上翻过就停在他看的原处
-        el.scrollTop = thinkStick ? el.scrollHeight : (savedThink[key] || 0);
-      } else if (savedThink[key]) {
-        el.scrollTop = savedThink[key];
-      }
+      if (savedThink[key]) el.scrollTop = savedThink[key];
     });
-    // 贴着底部的照旧跟到底；用户手动上翻过，就停在原处，不要抢回顶部
-    box.scrollTop = nearBottom ? box.scrollHeight : prevTop;
-    bindCopy(box);
-    bindThinkScroll(box);
-    bindTaskStop(box);
-    syncSend();
-    ensureTicker();
+    bindCopy(host);
+    bindTaskStop(host);
+  }
+
+  /** 实时区：只重绘「正在生成」的那一个气泡（内容随流式事件增长） */
+  function renderLive() {
+    const host = root.querySelector('#agentLiveHost');
+    if (!host) return;
+    if (!live) {
+      if (host.firstChild) host.innerHTML = '';
+      return;
+    }
+    // 保留用户对「思考过程」的滚动位置与折叠状态，重绘后还原
+    const oldThink = host.querySelector('.think-body[data-think="live"]');
+    if (oldThink && !thinkStick) liveThinkTop = oldThink.scrollTop;
+    const oldDet = host.querySelector('details.think');
+    const stayOpen = oldDet ? oldDet.open : true;
+    host.innerHTML = liveHtml();
+    const det = host.querySelector('details.think');
+    if (det) det.open = stayOpen;
+    const el = host.querySelector('.think-body[data-think="live"]');
+    if (el) el.scrollTop = thinkStick ? el.scrollHeight : liveThinkTop;
+    bindCopy(host);
+    bindThinkScroll(host);
   }
 
   /** 任务卡上的「停止」：中断这次请求，并把任务记为已停止 */
@@ -360,11 +435,12 @@ export function createAgent(ctx) {
   }
 
   /** 监听「思考过程」的滚动：贴底即视为跟随最新，往上翻则停住、不再自动跟 */
-  function bindThinkScroll(box) {
-    const el = box.querySelector('.think-body[data-think="live"]');
+  function bindThinkScroll(host) {
+    const el = host.querySelector('.think-body[data-think="live"]');
     if (!el) return;
     el.addEventListener('scroll', () => {
       thinkStick = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+      if (!thinkStick) liveThinkTop = el.scrollTop;   // 记住用户停在哪，重绘后还原
     });
   }
 
@@ -469,12 +545,28 @@ export function createAgent(ctx) {
     });
   }
 
-  /** 流式期间约 10fps 重绘，既不卡又能实时看到思考与正文 */
+  /**
+   * 流式期间约 10fps 重绘，既不卡又能实时看到思考与正文。
+   * 两个关键点：
+   *  1) 窗口在后台时直接不画——事件照常累积，回到前台由 visibilitychange 补一次，
+   *     避免后台白白跑重排（这正是「提问后转入后台就特别卡」的直接原因）。
+   *  2) 被节流跳过的更新会补一次「尾绘」，保证最后一次内容一定能显示出来。
+   */
   function livePaint(force) {
+    if (document.hidden) return;
     const now = Date.now();
-    if (!force && now - lastPaint < 90) return;
-    lastPaint = now;
-    paint();
+    if (force || now - lastPaint >= 90) {
+      if (paintTimer) { clearTimeout(paintTimer); paintTimer = null; }
+      lastPaint = now;
+      paint();
+      return;
+    }
+    if (paintTimer) return;
+    paintTimer = setTimeout(() => {
+      paintTimer = null;
+      lastPaint = Date.now();
+      paint();
+    }, 90 - (now - lastPaint));
   }
 
   function onEvent(ev) {
@@ -521,6 +613,7 @@ export function createAgent(ctx) {
     pendingStart = Date.now();
     live = { thinking: '', answer: '', ops: [], notes: [], round: 1, startedAt: Date.now(), thinkMs: 0, thinkStartAt: 0, lastThinkAt: 0 };
     thinkStick = true;   // 新一轮回答默认重新跟随最新思考
+    liveThinkTop = 0;
     paint();
     pendingTimer = setInterval(() => {
       const el = root.querySelector('#liveWaited');

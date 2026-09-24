@@ -22,8 +22,30 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
-const GIT = process.env.GIT_BIN
-  || 'C:/Users/35546/.workbuddy/binaries/PortableGit/versions/1.2.0/cmd/git.exe';
+
+/**
+ * 找 git：GIT_BIN 环境变量 → PATH 里的 git → 几个常见的安装位置。
+ *
+ * 这里刻意**不写死任何含本机用户名的绝对路径**：这份脚本会随仓库一起公开，
+ * 既不该泄露作者的系统账户名，也不能因为路径写死而让别人拿到就用不了。
+ * 凡是需要用户目录的地方，一律用 process.env.* 现拼。
+ * 换台机器 git 不在 PATH 时，设置 GIT_BIN 指过去即可。
+ */
+function findGit() {
+  if (process.env.GIT_BIN) return process.env.GIT_BIN;
+  const candidates = [
+    path.join(process.env.ProgramFiles || '', 'Git/cmd/git.exe'),
+    path.join(process.env['ProgramFiles(x86)'] || '', 'Git/cmd/git.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'Programs/Git/cmd/git.exe'),
+    // 开发工具自带的便携版：目录名固定，用户目录由环境变量拼出来
+    path.join(process.env.USERPROFILE || '', '.workbuddy/binaries/PortableGit/versions/1.2.0/cmd/git.exe')
+  ].filter(Boolean);
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) return c; } catch (_) { /* 继续试下一个 */ }
+  }
+  return 'git';   // 最后交给 PATH
+}
+const GIT = findGit();
 
 /* 证书：本机装了 HTTPS 中间人（如 SteamTools）时，Node 自带 CA 校验会报
  * "unable to verify the first certificate"，而 GitHub API 走的就是 fetch。

@@ -913,6 +913,20 @@ body.writing-full .editor-content {
 body.agent-open .agent-panel { width: 396px; flex-basis: 396px; border-left-color: var(--border); }
 @media (max-width: 1200px) { body.agent-open .agent-panel { width: 340px; flex-basis: 340px; } }
 
+/* 「占满窗口」：面板铺满整个窗口，聊天区与输入区跟着变大，长回答不用在小框里挤。
+   只在面板也处于展开时生效——收起面板后 body 上残留的类不会留下副作用。 */
+body.agent-open.agent-full .agent-panel {
+  position: fixed; inset: 0; width: auto; flex-basis: auto;
+  z-index: 80; border-left: none; border-radius: 0;
+}
+body.agent-open.agent-full .agent-head,
+body.agent-open.agent-full .agent-quick,
+body.agent-open.agent-full .agent-input { padding-left: 22px; padding-right: 22px; }
+body.agent-open.agent-full .agent-msgs { padding: 18px 22px; }
+body.agent-open.agent-full .bubble-body { max-width: 78%; }
+body.agent-open.agent-full .think-body { max-height: 46vh; }
+body.agent-open.agent-full .agent-input textarea { max-height: 34vh; }
+
 .agent-head {
   flex: 0 0 auto; display: flex; align-items: center; padding: 10px 12px;
   border-bottom: 1px solid var(--border);
@@ -1024,6 +1038,20 @@ body.agent-open .agent-panel { width: 396px; flex-basis: 396px; border-left-colo
 .bubble-acts .bubble-copy { opacity: .5; align-self: center; margin-top: 0; }
 .bubble:hover .bubble-acts .bubble-copy { opacity: 1; }
 .bubble-acts .bubble-copy.done { opacity: 1; }
+
+/* 思考块上的「跟随最新 / 已暂停」开关（放在 summary 里） */
+.think-follow {
+  margin-left: 8px; padding: 1px 7px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface-2); color: var(--muted); font-size: 11px; line-height: 1.6; cursor: pointer;
+}
+.think-follow:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+
+/* 单独查看思考过程的弹窗：给一个能安心读完的地方 */
+.think-modal {
+  max-height: 58vh; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+  padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface-2); color: var(--text-2); font-size: 12.5px; line-height: 1.85;
+}
 .live-foot {
   display: flex; align-items: center; gap: 7px; margin-top: 8px; padding-top: 6px;
   border-top: 1px dashed var(--border); font-size: 11px; color: var(--muted);

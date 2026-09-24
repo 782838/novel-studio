@@ -43,9 +43,14 @@ export function createAgent(ctx) {
   // 这样点「全部生成」之后会像跟助手对话一样：自动打开面板 → 显示正在做什么 → 末尾汇报条数。
   let tasks = [];
   let taskTimer = null;
-  // 「思考过程」是否自动跟随最新内容：默认跟随（贴底），用户手动往上翻后停住、
-  // 重新滚回底部又恢复跟随。否则流式期间要么被弹回顶部、要么看不到新写出的思考。
-  let thinkStick = true;
+  // 「思考过程」是否自动跟随最新内容。
+  // 默认「不跟随」：思考一直在往下长，若始终贴底，作者根本没法定睛看某一段。
+  // 跟随只由思考块上的开关控制；跟随态下往上翻会自动停住，但不会自己恢复跟随。
+  let thinkStick = false;
+  // 「助手占满窗口」的偏好：收起面板不丢，下次展开仍是全屏
+  let fullPref = false;
+  let lastOpen = false;     // 上次绘制时面板是否展开：用来只在「刚展开」那一刻校正输入框高度
+  const LS_FULL = 'novel-studio:agent-full';
 
   function statusHtml() {
     const configured = ctx.settings.hasKey;
@@ -68,12 +73,16 @@ export function createAgent(ctx) {
    * key 用来在整体重绘时按块还原各自的 scrollTop：思考块内部是可滚动区域，
    * 若不给它一个稳定标识，用户一滚动就会被重绘弹回顶部。
    */
-  function thinkBlock(thinking, thinkMs, open, key) {
+  function thinkBlock(thinking, thinkMs, open, key, opts = {}) {
     if (!thinking) return '';
     const attr = key ? ` data-think="${esc(key)}"` : '';
     const id = key === 'live' ? ' id="liveThink"' : '';
+    // 实时块带一个「跟随最新 / 已暂停」开关，作者能自己决定要不要被拽着走
+    const follow = opts.follow
+      ? `<button type="button" class="think-follow" data-think-follow="1">${thinkStick ? '⏸ 跟随中，点此暂停' : '▶ 已暂停，点此跟随'}</button>`
+      : '';
     return `<details class="think"${open ? ' open' : ''}>
-      <summary>🧠 思考过程${thinkMs ? `（${secs(thinkMs)} 秒）` : ''}</summary>
+      <summary>🧠 思考过程${thinkMs ? `（${secs(thinkMs)} 秒）` : ''}${follow}</summary>
       <div class="think-body"${attr}${id}>${esc(thinking)}</div>
     </details>`;
   }
@@ -171,7 +180,7 @@ export function createAgent(ctx) {
     return `<div class="bubble assistant">
       <div class="bubble-avatar">✦</div>
       <div class="bubble-body">
-        ${thinkBlock(tail(live.thinking, 8000), live.thinkMs, true, 'live')}
+        ${thinkBlock(tail(live.thinking, 8000), live.thinkMs, true, 'live', { follow: true })}
         ${idle ? `<div class="live-status"><span class="dot-typing"><i></i><i></i><i></i></span><em>正在读取项目数据并思考…</em></div>` : ''}
         ${notes}
         ${ops}
@@ -191,8 +200,12 @@ export function createAgent(ctx) {
     const meta = [];
     if (m.thinkMs) meta.push(`思考 ${secs(m.thinkMs)} 秒`);
     if (m.latency) meta.push(`用时 ${secs(m.latency)} 秒`);
-    // 助手回答常常很长，底部再放一个「复制」，省得为了复制滑回消息顶部
-    const copyBottom = `<div class="bubble-acts"><button class="bubble-copy inline" data-copy-mode="msg" data-idx="${idx}" title="复制这条消息">复制</button></div>`;
+    // 底部的操作条：
+    //  · 「思考过程」——回答结束后思考块是折叠的，一眼看不到，给个按钮能单独打开细看；
+    //  · 「复制」——回答常常很长，省得为了复制滑回消息顶部。
+    const thinkBtn = m.thinking
+      ? `<button class="bubble-copy inline" data-think-view="${idx}" title="单独打开这段思考过程">🧠 思考过程</button>` : '';
+    const copyBottom = `<div class="bubble-acts">${thinkBtn}<button class="bubble-copy inline" data-copy-mode="msg" data-idx="${idx}" title="复制这条消息">复制</button></div>`;
     return `<div class="bubble assistant">
       <div class="bubble-avatar">✦</div>
       <div class="bubble-body">
@@ -210,6 +223,33 @@ export function createAgent(ctx) {
     return `<details class="ops"><summary>已执行 ${ops.length} 项操作</summary>
       <ul>${ops.map((o) => `<li><span class="op-dot"></span>${esc(o.label || o.action)}</li>`).join('')}</ul>
     </details>`;
+  }
+
+  /** 单独一处查看某段思考过程：长对话里折叠块太不起眼，这里给个能安心读完的地方 */
+  function openThinkingModal(thinking, thinkMs) {
+    const text = String(thinking || '');
+    if (!text.trim()) return toast('这条回答没有留下思考过程', 'info');
+    openModal({
+      title: '思考过程',
+      subtitle: thinkMs ? `模型思考了 ${secs(thinkMs)} 秒` : '',
+      width: 780,
+      html: `<div class="think-modal">${esc(text)}</div>`,
+      buttons: [
+        { label: '复制', kind: 'ghost', keepOpen: true, onClick: () => { doCopy(text, null, '思考过程'); return false; } },
+        { label: '关闭', kind: 'primary' }
+      ]
+    });
+  }
+
+  /** 历史消息上的「🧠 思考过程」按钮 */
+  function bindThinkView(box) {
+    box.querySelectorAll('[data-think-view]').forEach((b) => {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const m = (ctx.data.messages || [])[Number(b.dataset.thinkView)];
+        if (m && m.thinking) openThinkingModal(m.thinking, m.thinkMs);
+      });
+    });
   }
 
   /** 复制文本：优先 Clipboard API，失败退回临时 textarea（局域网 http 打开时也可用） */
@@ -280,8 +320,38 @@ export function createAgent(ctx) {
     copyLastReply();
   }
 
+  /** 输入框随内容长高（封顶）：全屏时给得更高，写长指令不用挤在两行里 */
+  function autoGrow() {
+    const el = root.querySelector('#agentInput');
+    if (!el) return;
+    const full = document.body.classList.contains('agent-full');
+    const cap = Math.max(44, Math.round(window.innerHeight * (full ? 0.34 : 0.2)));
+    el.style.height = 'auto';
+    el.style.height = `${Math.max(44, Math.min(el.scrollHeight, cap))}px`;
+  }
+
+  /**
+   * 「占满窗口」开关：面板铺满整个窗口，聊天区与输入区跟着变大，长回答不用在小框里挤。
+   * 偏好写进 localStorage——收起面板时只摘掉视觉效果，下次展开仍是全屏。
+   */
+  function toggleFull(force) {
+    const on = force === undefined ? !document.body.classList.contains('agent-full') : !!force;
+    fullPref = on;
+    localStorage.setItem(LS_FULL, on ? '1' : '0');
+    document.body.classList.toggle('agent-full', on);
+    const b = root.querySelector('[data-act="full"]');
+    if (b) {
+      b.textContent = on ? '⤡' : '⛶';
+      b.title = on ? '退出全屏（Esc）' : '占满窗口';
+    }
+    requestAnimationFrame(() => { autoGrow(); lastPaint = 0; paint(); });
+  }
+
   function build() {
     built = true;
+    // 恢复「占满窗口」偏好：收起面板时会临时摘掉视觉效果，但偏好本身保留
+    fullPref = localStorage.getItem(LS_FULL) === '1';
+    if (fullPref) document.body.classList.add('agent-full');
     root.innerHTML = `
       <div class="agent-head">
         <div>
@@ -291,6 +361,7 @@ export function createAgent(ctx) {
         <div class="agent-head-acts">
           <button class="icon-btn" data-act="clear" title="清空对话">🗑</button>
           <button class="icon-btn" data-act="settings" title="模型设置">⚙</button>
+          <button class="icon-btn" data-act="full" title="${fullPref ? '退出全屏（Esc）' : '占满窗口'}">${fullPref ? '⤡' : '⛶'}</button>
           <button class="icon-btn" data-act="close" title="收起面板">›</button>
         </div>
       </div>
@@ -306,24 +377,34 @@ export function createAgent(ctx) {
         <button class="btn primary sm" id="agentSend">发送</button>
       </div>`;
 
+    const inputEl = root.querySelector('#agentInput');
     root.querySelectorAll('.quick-chip').forEach((b) => b.addEventListener('click', () => send(b.dataset.q)));
     // 一个按钮两副面孔：空闲时「发送」，回答中变「停止」
     root.querySelector('#agentSend').addEventListener('click', () => {
       if (busy) return stop();
-      const el = root.querySelector('#agentInput');
-      send(el.value);
-      el.value = '';
+      send(inputEl.value);
+      inputEl.value = '';
+      autoGrow();
     });
-    root.querySelector('#agentInput').addEventListener('keydown', (e) => {
+    inputEl.addEventListener('keydown', (e) => {
       // 纯 Enter 发送；Shift+Enter 换行；isComposing 时（中文输入法选词）不拦截，避免误发
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
         if (busy) return toast('助手正在回答，可先点「停止」再发下一条', 'info');
         send(e.target.value);
         e.target.value = '';
+        autoGrow();
       }
     });
-    root.querySelector('[data-act="close"]').addEventListener('click', () => ctx.toggleAgent(false));
+    // 输入框随内容长高（封顶），全屏时给得更高——否则下面这块总显得挤
+    inputEl.addEventListener('input', autoGrow);
+    window.addEventListener('resize', autoGrow);
+
+    root.querySelector('[data-act="close"]').addEventListener('click', () => {
+      document.body.classList.remove('agent-full');   // 收起时退出全屏视觉，但记住这个偏好
+      ctx.toggleAgent(false);
+    });
+    root.querySelector('[data-act="full"]').addEventListener('click', () => toggleFull());
     root.querySelector('[data-act="settings"]').addEventListener('click', () => openSettings(ctx));
     root.querySelector('[data-act="clear"]').addEventListener('click', async () => {
       const sure = await openConfirm({ title: '清空对话', message: '将清除本项目与助手的全部历史对话（不影响已写入的数据）。', danger: true, okText: '清空' });
@@ -332,6 +413,13 @@ export function createAgent(ctx) {
       await ctx.reload();
       toast('已清空', 'success');
     });
+    // 全屏时 Esc 退出全屏；stopPropagation 保证不会同时触发「沉浸写作」那条 Esc
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || !document.body.classList.contains('agent-full')) return;
+      e.stopPropagation();
+      toggleFull(false);
+    });
+    autoGrow();
     document.addEventListener('keydown', onShortcut);
     // 窗口一转到后台就停止渲染（流式事件照常累积），回到前台再补画一次。
     // 这是「提问后把软件转入后台就特别容易卡」的直接对策：后台不再产生任何重排/重绘。
@@ -352,6 +440,16 @@ export function createAgent(ctx) {
 
   function paint() {
     if (!built) build();
+    // 面板刚从收起变为展开：按偏好恢复全屏，并校正输入框高度
+    // （只在状态跳变时做，避免每次流式绘制都去读 scrollHeight 触发重排）
+    const openNow = root.classList.contains('open');
+    if (openNow !== lastOpen) {
+      lastOpen = openNow;
+      if (openNow) {
+        if (fullPref) document.body.classList.add('agent-full');
+        requestAnimationFrame(autoGrow);
+      }
+    }
     const st = root.querySelector('#aiStatus');
     if (st) st.outerHTML = statusHtml();
     const box = root.querySelector('#agentMsgs');
@@ -393,6 +491,7 @@ export function createAgent(ctx) {
       if (savedThink[key]) el.scrollTop = savedThink[key];
     });
     bindCopy(host);
+    bindThinkView(host);
     bindTaskStop(host);
   }
 
@@ -416,6 +515,25 @@ export function createAgent(ctx) {
     if (el) el.scrollTop = thinkStick ? el.scrollHeight : liveThinkTop;
     bindCopy(host);
     bindThinkScroll(host);
+    bindThinkFollow(host);
+  }
+
+  /** 思考块上的「跟随最新 / 已暂停」开关 */
+  function bindThinkFollow(host) {
+    const b = host.querySelector('[data-think-follow]');
+    if (!b) return;
+    b.addEventListener('click', (e) => {
+      // 按钮在 <summary> 里：阻止默认行为，否则点一下会把整个思考块折叠起来
+      e.preventDefault();
+      e.stopPropagation();
+      const el = host.querySelector('.think-body[data-think="live"]');
+      thinkStick = !thinkStick;
+      if (el) {
+        if (thinkStick) el.scrollTop = el.scrollHeight;
+        else liveThinkTop = el.scrollTop;
+      }
+      paint();
+    });
   }
 
   /** 任务卡上的「停止」：中断这次请求，并把任务记为已停止 */
@@ -434,13 +552,21 @@ export function createAgent(ctx) {
     });
   }
 
-  /** 监听「思考过程」的滚动：贴底即视为跟随最新，往上翻则停住、不再自动跟 */
+  /**
+   * 监听「思考过程」的滚动：跟随态下往上翻就停住；
+   * 注意**不会**因为"滚回底部"就自动恢复跟随——刚点「暂停」时内容往往只长了几像素，
+   * 判定仍贴着底部会立刻把跟随翻回去，开关就变成了摆设。跟随只由开关控制。
+   */
   function bindThinkScroll(host) {
     const el = host.querySelector('.think-body[data-think="live"]');
     if (!el) return;
     el.addEventListener('scroll', () => {
-      thinkStick = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-      if (!thinkStick) liveThinkTop = el.scrollTop;   // 记住用户停在哪，重绘后还原
+      if (thinkStick && el.scrollHeight - el.scrollTop - el.clientHeight > 24) {
+        thinkStick = false;
+        liveThinkTop = el.scrollTop;
+      } else if (!thinkStick) {
+        liveThinkTop = el.scrollTop;   // 记住用户停在哪，重绘后还原
+      }
     });
   }
 
@@ -612,7 +738,7 @@ export function createAgent(ctx) {
     pendingText = value;
     pendingStart = Date.now();
     live = { thinking: '', answer: '', ops: [], notes: [], round: 1, startedAt: Date.now(), thinkMs: 0, thinkStartAt: 0, lastThinkAt: 0 };
-    thinkStick = true;   // 新一轮回答默认重新跟随最新思考
+    thinkStick = false;  // 新一轮默认「暂停跟随」：思考块停住不动，作者能从头细看
     liveThinkTop = 0;
     paint();
     pendingTimer = setInterval(() => {

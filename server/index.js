@@ -886,7 +886,9 @@ on('POST', '/api/ai/chat/stream', async ({ req, res, body }) => {
       onEvent: (ev) => { remember(ev); write(ev); }
     });
     const latency = Date.now() - t0;
-    const thinking = String(result.thinking || '').slice(0, 8000);
+    // 思考过程留得宽一些：真实的长推理动辄两万字以上，截太短会让作者
+    // 「生成时看得到、回答结束后回看只剩一小段」。只在本地存储，代价可控。
+    const thinking = String(result.thinking || '').slice(0, 20000);
     store.insert('messages', {
       projectId, role: 'assistant', content: result.reply, ops: result.ops,
       thinking, thinkMs: result.thinkMs || 0, latency

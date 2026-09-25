@@ -34,7 +34,7 @@ export function createAgent(ctx) {
   let live = null;          // 流式中的现场（思考过程 / 正文 / 已执行操作）
   let lastPaint = 0;
   let paintTimer = null;    // 节流期间挂起的一次补绘：保证「最后一次更新」一定能画出来
-  let liveThinkTop = 0;     // 用户手动上翻「思考过程」时停留的位置
+  let liveShell = null;     // 实时气泡的骨架：只在开新对话时重建，其余每帧只做增量同步
   let staticSig = '';       // 静态区（历史消息 + 任务卡）的渲染签名：没变就直接跳过重建
   let dataRef = null;       // reload() 会整体换掉 data 对象引用，用它当「数据变了」的信号
   let dataVer = 0;
@@ -62,28 +62,34 @@ export function createAgent(ctx) {
 
   const secs = (ms) => (ms / 1000).toFixed(1);
 
-  /** 取字符串末尾 n 个字符（超长时前面补省略号）：实时只画尾巴，避免每帧重排几十 KB */
-  const tail = (s, n) => {
-    const t = String(s == null ? '' : s);
-    return t.length > n ? `…\n${t.slice(-n)}` : t;
-  };
+  /**
+   * 只把「新增的尾巴」追加进去。
+   * 长思考每帧都在变长，整段重建会把它滚回顶部、还曾因为「只渲染末尾 N 字」而把开头直接丢掉——
+   * 作者于是永远看不到思考的起头，看起来就是「一直在自己往下滑」。
+   * 这里只往同一个文本节点上 append，开销只跟新增字数有关。
+   */
+  function appendText(el, text) {
+    if (!el) return;
+    const t = String(text == null ? '' : text);
+    const n = el._n || 0;
+    if (t.length === n) return;
+    if (t.length > n && el.lastChild && el.lastChild.nodeType === 3) el.lastChild.appendData(t.slice(n));
+    else el.textContent = t;        // 首次填充，或内容被重置（例如新一轮回答）
+    el._n = t.length;
+  }
 
   /**
-   * 助手「思考过程」折叠块——实时与历史消息共用。
-   * key 用来在整体重绘时按块还原各自的 scrollTop：思考块内部是可滚动区域，
-   * 若不给它一个稳定标识，用户一滚动就会被重绘弹回顶部。
+   * 历史消息里的「思考过程」折叠块。
+   * 实时气泡那份不在这里生成——它要能逐帧增量追加（见 liveHtml / syncLiveDom），
+   * 否则长思考每次重绘都会被滚回顶部、开头还会被截掉。
+   * key 用于静态区重建时按块还原 scrollTop 与展开态。
    */
-  function thinkBlock(thinking, thinkMs, open, key, opts = {}) {
+  function thinkBlock(thinking, thinkMs, open, key) {
     if (!thinking) return '';
     const attr = key ? ` data-think="${esc(key)}"` : '';
-    const id = key === 'live' ? ' id="liveThink"' : '';
-    // 实时块带一个「跟随最新 / 已暂停」开关，作者能自己决定要不要被拽着走
-    const follow = opts.follow
-      ? `<button type="button" class="think-follow" data-think-follow="1">${thinkStick ? '⏸ 跟随中，点此暂停' : '▶ 已暂停，点此跟随'}</button>`
-      : '';
     return `<details class="think"${open ? ' open' : ''}>
-      <summary>🧠 思考过程${thinkMs ? `（${secs(thinkMs)} 秒）` : ''}${follow}</summary>
-      <div class="think-body"${attr}${id}>${esc(thinking)}</div>
+      <summary>🧠 思考过程${thinkMs ? `（${secs(thinkMs)} 秒）` : ''}</summary>
+      <div class="think-body"${attr}>${esc(thinking)}</div>
     </details>`;
   }
 
@@ -161,36 +167,81 @@ export function createAgent(ctx) {
     ).join(',')}`;
   }
 
+  /**
+   * 实时气泡的骨架：结构固定，内容交给 syncLiveDom 增量填。
+   * 之前每帧整块重绘，会（1）把思考块滚回顶部、（2）让长思考的开头被截掉，
+   * 作者根本没法安静读思考。空的部分统一用 hidden 切换，避免结构变动。
+   */
   function liveHtml() {
     if (!live) return '';
-    const waited = Math.round((Date.now() - live.startedAt) / 1000);
-    const ops = live.ops.length
-      ? `<div class="live-ops" id="liveOps">${live.ops.map((o) => `<span class="live-op">✓ ${esc(o.label || o.action)}</span>`).join('')}</div>`
-      : '';
-    const notes = live.notes.length
-      ? `<div class="live-notes">${live.notes.map((n) => `<span class="live-note">· ${esc(n)}</span>`).join('')}</div>`
-      : '';
-    const answer = live.answer ? `<div class="live-answer" id="liveAnswer">${esc(live.answer)}</div>` : '';
-    const idle = !live.thinking && !live.answer && !live.notes.length;
-    const copyTop = live.answer
-      ? `<button class="bubble-copy" data-copy-mode="live" title="复制正在生成的回答">复制</button>` : '';
-    // 正在生成的回答很长时，底部也要有一个「复制」，否则作者得滑回顶部才点得到
-    const copyBottom = live.answer
-      ? `<div class="bubble-acts"><button class="bubble-copy inline" data-copy-mode="live" title="复制正在生成的回答">复制</button></div>` : '';
     return `<div class="bubble assistant">
       <div class="bubble-avatar">✦</div>
       <div class="bubble-body">
-        ${thinkBlock(tail(live.thinking, 8000), live.thinkMs, true, 'live', { follow: true })}
-        ${idle ? `<div class="live-status"><span class="dot-typing"><i></i><i></i><i></i></span><em>正在读取项目数据并思考…</em></div>` : ''}
-        ${notes}
-        ${ops}
-        ${answer}
-        <div class="live-foot"><span class="dot-typing sm"><i></i><i></i><i></i></span>已等待 <b id="liveWaited">${waited}</b> 秒 · 可随时点「停止」
-        </div>
-        ${copyBottom}
+        <details class="think" open>
+          <summary>🧠 思考过程<span class="think-secs"></span><button type="button" class="think-follow" data-think-follow="1"></button></summary>
+          <div class="think-body" data-think="live" id="liveThink"></div>
+        </details>
+        <div class="live-status" id="liveIdle"><span class="dot-typing"><i></i><i></i><i></i></span><em>正在读取项目数据并思考…</em></div>
+        <div class="live-notes" id="liveNotes"></div>
+        <div class="live-ops" id="liveOps"></div>
+        <div class="live-answer" id="liveAnswer"></div>
+        <div class="live-foot"><span class="dot-typing sm"><i></i><i></i><i></i></span>已等待 <b id="liveWaited">0</b> 秒 · 可随时点「停止」</div>
+        <div class="bubble-acts" id="liveActs"><button class="bubble-copy inline" data-copy-mode="live" title="复制正在生成的回答">复制</button></div>
       </div>
-      ${copyTop}
+      <button class="bubble-copy" data-copy-mode="live" title="复制正在生成的回答">复制</button>
     </div>`;
+  }
+
+  /** 把 live 的内容增量同步进实时气泡（思考/正文只追加；小容器按内容变化重建） */
+  function syncLiveDom(host) {
+    const q = (s) => host.querySelector(s);
+
+    const det = q('details.think');
+    if (det) {
+      const has = !!live.thinking;
+      det.hidden = !has;
+      if (has) {
+        appendText(q('#liveThink'), live.thinking);
+        const sec = q('.think-secs');
+        if (sec) {
+          const s = live.thinkMs ? `（${secs(live.thinkMs)} 秒）` : '';
+          if (sec.textContent !== s) sec.textContent = s;
+        }
+        const fb = q('[data-think-follow]');
+        if (fb) {
+          const label = thinkStick ? '⏸ 跟随中，点此暂停' : '▶ 已暂停，点此跟随';
+          if (fb.textContent !== label) fb.textContent = label;
+        }
+        const body = q('#liveThink');
+        // 只有「跟随」时才贴底；暂停时一个字都不动，作者才能定睛看
+        if (body && thinkStick) body.scrollTop = body.scrollHeight;
+      }
+    }
+
+    const idle = q('#liveIdle');
+    if (idle) idle.hidden = !!(live.thinking || live.answer || live.notes.length);
+
+    const notes = q('#liveNotes');
+    if (notes) {
+      notes.hidden = !live.notes.length;
+      const html = live.notes.map((n) => `<span class="live-note">· ${esc(n)}</span>`).join('');
+      if (notes._last !== html) { notes.innerHTML = html; notes._last = html; }
+    }
+    const ops = q('#liveOps');
+    if (ops) {
+      ops.hidden = !live.ops.length;
+      const html = live.ops.map((o) => `<span class="live-op">✓ ${esc(o.label || o.action)}</span>`).join('');
+      if (ops._last !== html) { ops.innerHTML = html; ops._last = html; }
+    }
+
+    const ans = q('#liveAnswer');
+    if (ans) { appendText(ans, live.answer); ans.hidden = !live.answer; }
+
+    // 有正文才显示复制按钮（顶部悬浮 + 底部常驻）
+    const acts = q('#liveActs');
+    if (acts) acts.hidden = !live.answer;
+    const topCopy = host.querySelector('.bubble > .bubble-copy');
+    if (topCopy) topCopy.hidden = !live.answer;
   }
 
   function bubble(m, idx) {
@@ -495,27 +546,26 @@ export function createAgent(ctx) {
     bindTaskStop(host);
   }
 
-  /** 实时区：只重绘「正在生成」的那一个气泡（内容随流式事件增长） */
+  /**
+   * 实时区：骨架只在「开新一轮对话」时建一次，之后每帧只做增量同步。
+   * 既避免思考块被滚回顶部 / 开头被截掉，也省掉每帧重建 DOM 与重新绑定事件的开销。
+   */
   function renderLive() {
     const host = root.querySelector('#agentLiveHost');
     if (!host) return;
     if (!live) {
       if (host.firstChild) host.innerHTML = '';
+      liveShell = null;
       return;
     }
-    // 保留用户对「思考过程」的滚动位置与折叠状态，重绘后还原
-    const oldThink = host.querySelector('.think-body[data-think="live"]');
-    if (oldThink && !thinkStick) liveThinkTop = oldThink.scrollTop;
-    const oldDet = host.querySelector('details.think');
-    const stayOpen = oldDet ? oldDet.open : true;
-    host.innerHTML = liveHtml();
-    const det = host.querySelector('details.think');
-    if (det) det.open = stayOpen;
-    const el = host.querySelector('.think-body[data-think="live"]');
-    if (el) el.scrollTop = thinkStick ? el.scrollHeight : liveThinkTop;
-    bindCopy(host);
-    bindThinkScroll(host);
-    bindThinkFollow(host);
+    if (!liveShell || liveShell.forLive !== live || !host.firstElementChild) {
+      host.innerHTML = liveHtml();
+      liveShell = { forLive: live };
+      bindCopy(host);
+      bindThinkScroll(host);
+      bindThinkFollow(host);
+    }
+    syncLiveDom(host);
   }
 
   /** 思考块上的「跟随最新 / 已暂停」开关 */
@@ -526,11 +576,10 @@ export function createAgent(ctx) {
       // 按钮在 <summary> 里：阻止默认行为，否则点一下会把整个思考块折叠起来
       e.preventDefault();
       e.stopPropagation();
-      const el = host.querySelector('.think-body[data-think="live"]');
       thinkStick = !thinkStick;
-      if (el) {
-        if (thinkStick) el.scrollTop = el.scrollHeight;
-        else liveThinkTop = el.scrollTop;
+      if (thinkStick) {
+        const el = host.querySelector('.think-body[data-think="live"]');
+        if (el) el.scrollTop = el.scrollHeight;
       }
       paint();
     });
@@ -561,12 +610,7 @@ export function createAgent(ctx) {
     const el = host.querySelector('.think-body[data-think="live"]');
     if (!el) return;
     el.addEventListener('scroll', () => {
-      if (thinkStick && el.scrollHeight - el.scrollTop - el.clientHeight > 24) {
-        thinkStick = false;
-        liveThinkTop = el.scrollTop;
-      } else if (!thinkStick) {
-        liveThinkTop = el.scrollTop;   // 记住用户停在哪，重绘后还原
-      }
+      if (thinkStick && el.scrollHeight - el.scrollTop - el.clientHeight > 24) thinkStick = false;
     });
   }
 
@@ -739,7 +783,6 @@ export function createAgent(ctx) {
     pendingStart = Date.now();
     live = { thinking: '', answer: '', ops: [], notes: [], round: 1, startedAt: Date.now(), thinkMs: 0, thinkStartAt: 0, lastThinkAt: 0 };
     thinkStick = false;  // 新一轮默认「暂停跟随」：思考块停住不动，作者能从头细看
-    liveThinkTop = 0;
     paint();
     pendingTimer = setInterval(() => {
       const el = root.querySelector('#liveWaited');

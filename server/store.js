@@ -18,7 +18,8 @@ const DEFAULT_SETTINGS = {
   providers: [],
   activeProvider: null,
   useDemo: true, // 未配置 key 时自动用演示模式产出，保证功能可体验
-  agentPersona: '',
+  agentPersona: '',      // 旧版「助手人设」，首次进入会迁移进记忆箱，之后不再使用
+  mindBoxEnabled: true,  // 记忆箱总开关：关掉后助手回到"没被调教过"的原始状态
   autoApply: false
 };
 
@@ -84,10 +85,37 @@ const COLLECTIONS = [
   'beats', 'chapters', 'world', 'foreshadow', 'notes', 'messages', 'materials'
 ];
 
+/** 记忆箱（助手档案）的字段规整：名字、头像、人设、记忆条 */
+const MIND_LIMITS = { text: 500, count: 100, persona: 4000 };
+function normalizeMemory(m) {
+  m = m || {};
+  return {
+    id: (typeof m.id === 'string' && m.id) ? m.id : uid('mem'),
+    text: String(m.text || '').trim().slice(0, MIND_LIMITS.text),
+    enabled: m.enabled !== false,
+    createdAt: Number(m.createdAt) || Date.now()
+  };
+}
+function normalizeMind(m) {
+  m = m || {};
+  return {
+    id: (typeof m.id === 'string' && m.id) ? m.id : uid('mind'),
+    name: String(m.name || '').trim().slice(0, 24) || '未命名助手',
+    avatar: String(m.avatar || '').trim(),        // 空 = 用内置默认头像；也可存 dataURL 或单个 emoji
+    persona: String(m.persona || '').trim().slice(0, MIND_LIMITS.persona),
+    memories: (Array.isArray(m.memories) ? m.memories : []).map(normalizeMemory).slice(0, MIND_LIMITS.count),
+    builtin: m.builtin === true,                 // 内置默认助手：不可删除，但可改
+    createdAt: Number(m.createdAt) || Date.now(),
+    updatedAt: Number(m.updatedAt) || 0
+  };
+}
+
 function blank() {
   const db = {
     meta: { version: 1, createdAt: Date.now() },
-    settings: { ...DEFAULT_SETTINGS }
+    settings: { ...DEFAULT_SETTINGS },
+    minds: [],
+    activeMindId: null
   };
   COLLECTIONS.forEach((c) => { db[c] = []; });
   return db;
@@ -111,6 +139,8 @@ function load() {
       state.settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) };
       migrateSettings(state.settings);
       COLLECTIONS.forEach((c) => { if (!Array.isArray(state[c])) state[c] = []; });
+      if (!Array.isArray(state.minds)) state.minds = [];
+      state.minds = state.minds.map(normalizeMind);
     } catch (err) {
       const bak = `${DATA_FILE}.broken-${Date.now()}`;
       try { fs.copyFileSync(DATA_FILE, bak); } catch (_) { /* ignore */ }
@@ -126,6 +156,16 @@ function load() {
 function save() {
   if (timer) clearTimeout(timer);
   timer = setTimeout(flush, 150);
+}
+
+/**
+ * 强制从磁盘重新读取（丢弃内存缓存）。
+ * 外置助手（WorkBuddy 等）直接改 store.json 后，前端点「刷新」时后端先调这个，
+ * 否则内存态不会变，外部改动看不到。
+ */
+function reload() {
+  state = null;
+  return load();
 }
 
 function flush() {
@@ -218,10 +258,134 @@ function bundle(projectId) {
   return out;
 }
 
+// ---------- 记忆箱（AI 助手档案；全局，不属于任何作品） ----------
+
+function allMinds() { return load().minds; }
+
+function getMind(id) { return load().minds.find((x) => x.id === id) || null; }
+
+function activeMind() {
+  const db = load();
+  return db.minds.find((x) => x.id === db.activeMindId) || db.minds[0] || null;
+}
+
+function insertMind(obj) {
+  const item = normalizeMind({ ...obj, id: uid('mind'), createdAt: Date.now() });
+  load().minds.push(item);
+  save();
+  return item;
+}
+
+function updateMind(id, patch) {
+  const db = load();
+  const i = db.minds.findIndex((x) => x.id === id);
+  if (i < 0) return null;
+  const old = db.minds[i];
+  // builtin / id / createdAt 由仓库把持，不被外部补丁覆盖
+  const next = normalizeMind({
+    ...old, ...patch, id: old.id, createdAt: old.createdAt, builtin: old.builtin
+  });
+  next.updatedAt = Date.now();
+  db.minds[i] = next;
+  save();
+  return next;
+}
+
+function removeMind(id) {
+  const db = load();
+  const m = db.minds.find((x) => x.id === id);
+  if (!m || m.builtin) return false;      // 内置默认助手不可删除
+  db.minds = db.minds.filter((x) => x.id !== id);
+  if (db.activeMindId === id) db.activeMindId = db.minds.length ? db.minds[0].id : null;
+  save();
+  return true;
+}
+
+function setActiveMind(id) {
+  const db = load();
+  if (!db.minds.some((x) => x.id === id)) return null;
+  db.activeMindId = id;
+  save();
+  return id;
+}
+
+/**
+ * 首次进入时把「设置 → 助手人设」迁移成内置默认助手：
+ * 从此只在记忆箱一处定义助手性格，避免两份人设互相打架。
+ */
+function ensureDefaultMind() {
+  const db = load();
+  if (db.minds.length) {
+    if (!db.activeMindId || !db.minds.some((x) => x.id === db.activeMindId)) {
+      db.activeMindId = db.minds[0].id;
+      save();
+    }
+    return db.minds.find((x) => x.id === db.activeMindId) || null;
+  }
+  const def = normalizeMind({
+    id: uid('mind'),
+    name: '默认助手',
+    persona: String((db.settings || {}).agentPersona || '').trim(),
+    memories: [],
+    builtin: true,
+    createdAt: Date.now()
+  });
+  db.minds.push(def);
+  db.activeMindId = def.id;
+  save();
+  return def;
+}
+
+/** 导出：传 id 只导出那一个，不传导出全部 */
+function exportMinds(onlyId) {
+  const db = load();
+  const list = onlyId ? db.minds.filter((x) => x.id === onlyId) : db.minds.slice();
+  return {
+    format: 'novel-studio-mind',
+    version: 1,
+    exportedAt: Date.now(),
+    activeName: (activeMind() || {}).name || '',
+    minds: list.map((m) => ({
+      name: m.name,
+      avatar: m.avatar,
+      persona: m.persona,
+      memories: m.memories.map((x) => ({ text: x.text, enabled: x.enabled }))
+    }))
+  };
+}
+
+/** 导入：append（默认，同名覆盖）/ replace（先清空） */
+function importMinds(payload, mode = 'append') {
+  const db = load();
+  const list = Array.isArray(payload && payload.minds) ? payload.minds : null;
+  if (!list || !list.length) throw new Error('文件里没有可导入的助手');
+  if (mode === 'replace') db.minds = [];
+  let added = 0, updated = 0;
+  list.forEach((raw) => {
+    const m = normalizeMind(raw);
+    const same = db.minds.find((x) => x.name === m.name);
+    if (same) {
+      same.avatar = m.avatar;
+      same.persona = m.persona;
+      same.memories = m.memories;
+      same.updatedAt = Date.now();
+      updated++;
+    } else {
+      db.minds.push(m);
+      added++;
+    }
+  });
+  if (!db.activeMindId || !db.minds.some((x) => x.id === db.activeMindId)) db.activeMindId = db.minds[0].id;
+  save();
+  return { added, updated, total: db.minds.length };
+}
+
 module.exports = {
-  DATA_DIR, ROOT, COLLECTIONS, DEFAULT_SETTINGS,
-  normalizeProvider, migrateSettings,
-  load, flush, save, uid,
+  DATA_DIR, ROOT, COLLECTIONS, DEFAULT_SETTINGS, MIND_LIMITS,
+  normalizeProvider, migrateSettings, normalizeMind, normalizeMemory,
+  load, flush, save, reload, uid,
   all, find, where, byProject, insert, update, remove, removeWhere, nextOrder,
-  getProject, deleteProject, bundle
+  getProject, deleteProject, bundle,
+  allMinds, getMind, activeMind, insertMind, updateMind, removeMind, setActiveMind,
+  ensureDefaultMind, exportMinds, importMinds
 };

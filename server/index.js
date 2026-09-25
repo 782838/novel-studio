@@ -191,6 +191,12 @@ on('GET', '/api/meta', async ({ res }) => {
   });
 });
 
+/** 强制后端从磁盘重新读取数据（外置助手直接改 store.json 后，前端「刷新」按钮调用） */
+on('POST', '/api/reload', async ({ res }) => {
+  store.reload();
+  ok(res, { ok: true });
+});
+
 // --- 设置
 
 on('GET', '/api/settings', async ({ res }) => {
@@ -237,6 +243,83 @@ on('PUT', '/api/settings', async ({ res, body }) => {
     activeName: active ? active.name : null,
     providerCount: list.length
   });
+});
+
+// --- 记忆箱（AI 助手档案；全局，不绑定任何作品）
+// 说明：这里刻意不走 `/api/minds/:id` 这类通配路径——下方还有 `/api/:coll/:eid`
+// 的集合级路由，形状相同会被抢先匹配。统一用 POST + body 传 id，避免歧义。
+
+on('GET', '/api/minds', async ({ res }) => {
+  const def = store.ensureDefaultMind();     // 首次进入：把旧的人设迁移成内置默认助手
+  ok(res, {
+    minds: store.allMinds(),
+    activeMindId: store.load().activeMindId || (def && def.id) || null,
+    limits: store.MIND_LIMITS,
+    defaultAvatar: '/img/avatar-lucy.png'
+  });
+});
+
+on('POST', '/api/minds/create', async ({ res, body }) => {
+  const m = store.insertMind({
+    name: body.name || '新助手',
+    avatar: body.avatar || '',
+    persona: body.persona || '',
+    memories: Array.isArray(body.memories) ? body.memories : []
+  });
+  store.setActiveMind(m.id);
+  ok(res, m);
+});
+
+on('POST', '/api/minds/update', async ({ res, body }) => {
+  const m = store.updateMind(String(body.id || ''), body.patch || {});
+  if (!m) return fail(res, '助手不存在', 404);
+  ok(res, m);
+});
+
+on('POST', '/api/minds/remove', async ({ res, body }) => {
+  const done = store.removeMind(String(body.id || ''));
+  if (!done) return fail(res, '删不掉：要么是内置默认助手，要么已经不在了');
+  ok(res, { ok: true, activeMindId: store.load().activeMindId });
+});
+
+/** 记忆箱总开关：关掉后所有助手的人设与记忆都不再注入，助手回到原始状态 */
+on('POST', '/api/minds/toggle', async ({ res, body }) => {
+  const db = store.load();
+  db.settings.mindBoxEnabled = body.enabled !== false;
+  store.save();
+  ok(res, { mindBoxEnabled: db.settings.mindBoxEnabled });
+});
+
+on('POST', '/api/minds/active', async ({ res, body }) => {
+  const id = store.setActiveMind(String(body.id || ''));
+  if (!id) return fail(res, '助手不存在', 404);
+  ok(res, { activeMindId: id });
+});
+
+on('POST', '/api/minds/export', async ({ res, body }) => {
+  const scope = (body && body.scope) || 'all';
+  ok(res, store.exportMinds(scope === 'current' ? store.load().activeMindId : null));
+});
+
+on('POST', '/api/minds/import', async ({ res, body }) => {
+  try {
+    ok(res, store.importMinds(body.payload, body.mode === 'replace' ? 'replace' : 'append'));
+  } catch (err) {
+    fail(res, err);
+  }
+});
+
+/** 从本作品最近的对话里提炼「值得长期记住的要求」 */
+on('POST', '/api/minds/distill', async ({ res, body }) => {
+  try {
+    const lines = await ai.distillMemories({
+      projectId: body.projectId,
+      current: Array.isArray(body.current) ? body.current : []
+    });
+    ok(res, { lines });
+  } catch (err) {
+    fail(res, err);
+  }
 });
 
 // --- 项目

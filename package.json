@@ -1,7 +1,7 @@
 {
   "name": "novel-studio",
   "productName": "小说创作工作台",
-  "version": "1.4.6",
+  "version": "1.4.8",
   "private": true,
   "description": "小说辅助创作工作台：大纲记忆与补全、角色集、主次线路梳理、可操作的 AI 智能体",
   "author": "Novel Studio",

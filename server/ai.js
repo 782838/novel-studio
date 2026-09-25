@@ -969,8 +969,25 @@ function parseArgs(raw) {
 
 // ---------------------------------------------------------------- 系统提示
 
+/**
+ * 当前助手的人设 + 长期记忆（来自「记忆箱」）。
+ * 记忆箱是全局的、不随作品变化，而且**每次提问都会带上**——
+ * 不像对话历史只取最近 10 条。所以这里只拼已启用的记忆条，方便作者按需关掉。
+ */
+function mindPrompt() {
+  const m = store.activeMind();
+  if (!m) return String((settings() || {}).agentPersona || '').trim();   // 老版本兜底
+  const lines = (m.memories || [])
+    .filter((x) => x.enabled && String(x.text || '').trim())
+    .map((x) => `- ${String(x.text).trim()}`);
+  const parts = [];
+  if (m.persona) parts.push(`## 助手人设（${m.name}）\n${m.persona}`);
+  if (lines.length) parts.push(`## 作者长期习惯与要求（务必遵守）\n${lines.join('\n')}`);
+  return parts.join('\n\n');
+}
+
 function systemPrompt(projectId, useTools, currentChapterId) {
-  const extra = settings().agentPersona;
+  const extra = mindPrompt();
   return [
     '你是一位资深小说策划编辑，协助作者完成长篇小说的构思、架构与落地。',
     '你的工作对象是作者项目里的真实数据——你会通过工具直接读写它，而不是只在嘴巴上建议。',
@@ -988,7 +1005,7 @@ function systemPrompt(projectId, useTools, currentChapterId) {
     '7. 「外部素材」是从其他平台导入的历史对话，可能是未经整理的原始想法。需要引用时先调用 read_material 读取全文，不要凭索引里的预览臆测内容。',
     '8. 从素材里提炼内容时，要转化为本项目结构化的大纲/角色/线路/设定，而不是照抄原话。',
     useTools ? '9. 全部操作完成后调用 finish，输出给作者的总结。' : '9. 完成后用 ACTION 之外的方式输出纯文本总结。',
-    extra ? `\n## 作者额外要求\n${extra}` : ''
+    extra ? `\n## 助手设定与作者长期要求（记忆箱）\n${extra}` : ''
   ].filter(Boolean).join('\n');
 }
 
@@ -1195,9 +1212,16 @@ async function runAgent({ projectId, message, history = [], chapterId = null, on
 // ---------------------------------------------------------------- 结构化生成
 
 async function generateJSON(prompt, { maxTokens = 3000, temperature = 0.9, signal } = {}) {
+  const extra = mindPrompt();
   const json = await callChat({
     messages: [
-      { role: 'system', content: '你输出的内容必须是可以被 JSON.parse 直接解析的纯 JSON，不要包含解释文字、不要包裹 ``` 代码块。' },
+      {
+        role: 'system',
+        content: [
+          '你输出的内容必须是可以被 JSON.parse 直接解析的纯 JSON，不要包含解释文字、不要包裹 ``` 代码块。',
+          extra
+        ].filter(Boolean).join('\n\n')
+      },
       { role: 'user', content: prompt }
     ],
     temperature,
@@ -1366,8 +1390,9 @@ async function continueChapter({ projectId, chapterId, instruction = '', words =
           `你正在为《${p.title}》续写正文。`,
           p.genre ? `类型：${p.genre}` : '',
           '要求：保持既有文风与人称，衔接上文不重复剧情，推进而不是原地打转，重视感官细节与人物内在反应。',
-          '只输出正文，不要解释、不要标注、不要出现标题行。'
-        ].filter(Boolean).join('\n')
+          '只输出正文，不要解释、不要标注、不要出现标题行。',
+          mindPrompt()      // 记忆箱：助手人设与作者长期要求，续写同样要守
+        ].filter(Boolean).join('\n\n')
       },
       {
         role: 'user',
@@ -1621,10 +1646,43 @@ function pickName(seed = '') {
   return SURNAME[n % SURNAME.length] + GIVEN[(n >> 2) % GIVEN.length];
 }
 
+/**
+ * 从本作品最近的对话里，提炼「值得长期记住的写作要求」——记忆箱的一键提炼用。
+ * 只读对话、不写任何数据；返回若干条可直接存成记忆条的短句。
+ */
+async function distillMemories({ projectId, current = [] } = {}) {
+  const msgs = store.where('messages', (m) => m.projectId === projectId)
+    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+    .slice(-24);
+  if (!msgs.length) throw new Error('这个作品还没有可以提炼的对话');
+  const convo = msgs
+    .map((m) => `${m.role === 'assistant' ? '助手' : '作者'}：${String(m.content || '').slice(0, 500)}`)
+    .join('\n');
+  const already = current.map((t) => `- ${t}`).join('\n');
+  const prompt = [
+    '下面是作者与写作助手的一段真实对话。',
+    '请从中提炼出「作者反复强调、或明显偏好的写作要求与习惯」，作为助手以后必须长期遵守的规则。',
+    '',
+    '要求：',
+    '1. 只提炼作者明确表达过或反复出现的偏好；不要臆测，也不要把助手自己的想法当成作者的要求。',
+    '2. 每条写成一句可直接执行的指令，不超过 60 字，写清「要做什么」或「不要做什么」。',
+    '3. 最多 8 条；宁缺毋滥，实在提炼不出就返回空数组。',
+    '4. 只输出 JSON 数组，例如 ["对话要短，少写景", "不要用巧合推动剧情"]',
+    already ? `\n已经记过的（不要重复）：\n${already}` : '',
+    '',
+    '对话内容：',
+    convo
+  ].filter(Boolean).join('\n');
+
+  const out = await generateJSON(prompt, { maxTokens: 1200, temperature: 0.3 });
+  const list = Array.isArray(out) ? out : (out && Array.isArray(out.lines) ? out.lines : []);
+  return list.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 8);
+}
+
 module.exports = {
   settings, llmEnabled, endpointUrl, testConnection, callChat,
   buildContext, buildOutlineText, buildCharacterText, buildLineText,
-  buildChapterText, buildMemoText,
+  buildChapterText, buildMemoText, mindPrompt,
   runAgent, generate, continueChapter, analyzeNovel, generateMemos, PALETTE, pickColor,
-  makeExecutor
+  makeExecutor, distillMemories
 };

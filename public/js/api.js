@@ -23,6 +23,9 @@ const del = (url) => req(url, { method: 'DELETE' });
 export default {
   meta: () => get('/api/meta'),
 
+  /** 让后端从磁盘重新读取数据（外部修改后刷新用） */
+  reload: () => post('/api/reload', {}),
+
   settings: () => get('/api/settings'),
   saveSettings: (body) => put('/api/settings', body),
 
@@ -93,5 +96,16 @@ export default {
   /** 生成 AI 记忆点：opts 可含 { chapterIds, onlyMissing }；options 可含 { signal } */
   aiMemos: (projectId, opts = {}, options) => post('/api/ai/memos', { projectId, ...opts }, options),
   aiContext: (projectId) => get(`/api/ai/context/${projectId}`),
-  clearMessages: (pid) => del(`/api/projects/${pid}/messages`)
+  clearMessages: (pid) => del(`/api/projects/${pid}/messages`),
+
+  /* 记忆箱（AI 助手档案，全局） */
+  minds: () => get('/api/minds'),
+  mindCreate: (body) => post('/api/minds/create', body),
+  mindUpdate: (id, patch) => post('/api/minds/update', { id, patch }),
+  mindRemove: (id) => post('/api/minds/remove', { id }),
+  mindActivate: (id) => post('/api/minds/active', { id }),
+  mindExport: (scope = 'all') => post('/api/minds/export', { scope }),
+  mindImport: (payload, mode = 'append') => post('/api/minds/import', { payload, mode }),
+  mindDistill: (projectId, current = [], signal) =>
+    post('/api/minds/distill', { projectId, current }, signal ? { signal } : undefined)
 };

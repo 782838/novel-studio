@@ -1344,3 +1344,73 @@ body.agent-open.agent-full .agent-input textarea { max-height: 34vh; }
 .ai-wait-time b { color: var(--accent); font-variant-numeric: tabular-nums; }
 .ai-wait #aiWaitStop { align-self: flex-start; }
 
+/* ==================== 记忆箱（AI 助手档案） ==================== */
+
+/* agent 头部：生效助手头像 + 名字 */
+.agent-head-id { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.agent-head-avatar { width: 26px; height: 26px; border-radius: 50%; overflow: hidden; flex: 0 0 auto; display: grid; place-items: center; background: var(--surface-3); }
+.agent-mind-name { font-size: 12px; color: var(--accent); margin-left: 2px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 头像通用尺寸 */
+.avatar-sm { width: 38px; height: 38px; border-radius: 50%; }
+.avatar-md { width: 64px; height: 64px; border-radius: 50%; }
+.avatar-img, .head-avatar-img { width: 100%; height: 100%; object-fit: cover; display: block; background: var(--surface-3); }
+.avatar-emoji, .head-avatar-emoji { width: 100%; height: 100%; display: grid; place-items: center; line-height: 1; }
+.avatar-sm.avatar-emoji, .avatar-sm.head-avatar-emoji { font-size: 20px; }
+.avatar-md.avatar-emoji, .avatar-md.head-avatar-emoji { font-size: 32px; }
+.head-avatar-img, .head-avatar-emoji { font-size: 15px; }
+
+/* 记忆箱总开关 */
+.mind-top { padding: 2px 2px 12px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch-track { width: 40px; height: 22px; border-radius: 999px; background: var(--border-strong); position: relative; transition: .18s; flex: 0 0 auto; }
+.switch-track::after { content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: .18s; }
+.switch input:checked + .switch-track { background: var(--green); }
+.switch input:checked + .switch-track::after { transform: translateX(18px); }
+.switch-label { font-size: 13px; color: var(--text-2); }
+
+/* 助手列表 */
+.mind-list { display: flex; flex-direction: column; gap: 10px; max-height: 46vh; overflow-y: auto; padding-right: 4px; }
+.mind-card { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); transition: .15s; }
+.mind-card.is-active { border-color: var(--accent); background: var(--accent-soft); }
+.mind-card-avatar { flex: 0 0 auto; width: 38px; height: 38px; border-radius: 50%; overflow: hidden; display: grid; place-items: center; background: var(--surface-3); }
+.mind-card-body { flex: 1; min-width: 0; }
+.mind-card-name { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.mind-card-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.mind-card-acts { display: flex; gap: 6px; flex: 0 0 auto; }
+.mind-badge { font-size: 10.5px; padding: 1px 7px; border-radius: 999px; background: var(--accent); color: #fff; font-weight: 500; white-space: nowrap; }
+.mind-badge.builtin { background: var(--amber); }
+.mind-empty { color: var(--muted); text-align: center; padding: 28px 0; font-size: 13px; }
+.mind-actions { display: flex; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+
+/* 单个助手编辑器 */
+.me { display: flex; flex-direction: column; gap: 12px; }
+.me-head { display: flex; gap: 12px; align-items: flex-start; }
+.me-avatar { width: 64px; height: 64px; border-radius: 50%; overflow: hidden; flex: 0 0 auto; display: grid; place-items: center; background: var(--surface-3); border: 1px solid var(--border); }
+.me-head-info { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.me-mem-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--text-2); }
+.me-mem-list { display: flex; flex-direction: column; gap: 8px; max-height: 38vh; overflow-y: auto; }
+.me-mem { display: flex; gap: 8px; align-items: flex-start; }
+.me-mem-text { flex: 1; resize: vertical; min-height: 38px; padding: 7px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 13px; font-family: inherit; }
+.me-mem-text:focus { outline: none; border-color: var(--accent); }
+.me-mem-on { font-size: 12px; color: var(--text-2); display: flex; align-items: center; gap: 4px; white-space: nowrap; padding-top: 8px; }
+.me-mem-del { flex: 0 0 auto; border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; padding: 6px 4px; border-radius: 6px; }
+.me-mem-del:hover { color: var(--red); background: #fdeceb; }
+.me-mem-empty { color: var(--muted); font-size: 12.5px; padding: 8px 2px; }
+.me-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+/* 头像编辑器（emoji 库 + 圆形裁剪） */
+.av { display: flex; flex-direction: column; gap: 12px; align-items: center; }
+.av-emojis { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; width: 100%; }
+.av-emoji { border: 1px solid var(--border); background: var(--surface); border-radius: 8px; font-size: 18px; height: 32px; cursor: pointer; transition: .12s; }
+.av-emoji:hover { border-color: var(--accent); background: var(--accent-soft); transform: translateY(-1px); }
+.av-or { font-size: 12px; color: var(--muted); width: 100%; text-align: center; }
+.av-crop { width: 200px; height: 200px; border-radius: 50%; overflow: hidden; position: relative; background: var(--surface-3); border: 2px solid var(--border-strong); cursor: grab; }
+.av-crop:active { cursor: grabbing; }
+.av-crop-img { position: absolute; top: 0; left: 0; user-select: none; -webkit-user-drag: none; }
+.av-crop-hint { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 12px; padding: 0 20px; text-align: center; }
+.av #avScale { width: 200px; }
+.av-row { display: flex; gap: 8px; }
+.av-foot { display: flex; justify-content: flex-end; gap: 8px; width: 100%; }
+

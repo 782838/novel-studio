@@ -405,11 +405,15 @@ export function createAgent(ctx) {
     if (fullPref) document.body.classList.add('agent-full');
     root.innerHTML = `
       <div class="agent-head">
-        <div>
-          <b>AI 助手</b>
-          ${'<span id="aiStatus"></span>'}
+        <div class="agent-head-id">
+          <span class="agent-head-avatar" id="agentHeadAvatar"></span>
+          <div>
+            <b>AI 助手</b><span id="agentMindName" class="agent-mind-name"></span>
+            ${'<span id="aiStatus"></span>'}
+          </div>
         </div>
         <div class="agent-head-acts">
+          <button class="icon-btn" data-act="bottom" title="滚到底部">⬇</button>
           <button class="icon-btn" data-act="clear" title="清空对话">🗑</button>
           <button class="icon-btn" data-act="settings" title="模型设置">⚙</button>
           <button class="icon-btn" data-act="full" title="${fullPref ? '退出全屏（Esc）' : '占满窗口'}">${fullPref ? '⤡' : '⛶'}</button>
@@ -456,6 +460,7 @@ export function createAgent(ctx) {
       ctx.toggleAgent(false);
     });
     root.querySelector('[data-act="full"]').addEventListener('click', () => toggleFull());
+    root.querySelector('[data-act="bottom"]').addEventListener('click', scrollToBottom);
     root.querySelector('[data-act="settings"]').addEventListener('click', () => openSettings(ctx));
     root.querySelector('[data-act="clear"]').addEventListener('click', async () => {
       const sure = await openConfirm({ title: '清空对话', message: '将清除本项目与助手的全部历史对话（不影响已写入的数据）。', danger: true, okText: '清空' });
@@ -503,16 +508,52 @@ export function createAgent(ctx) {
     }
     const st = root.querySelector('#aiStatus');
     if (st) st.outerHTML = statusHtml();
+    paintHead();
     const box = root.querySelector('#agentMsgs');
-    // 主列表只在「静态区」重建时才可能被重置滚动：重绘前后记录并还原；
-    // 贴着底部的照旧跟到底，用户手动上翻过就停在原处，不要抢回顶部。
-    const prevTop = box.scrollTop;
-    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 140;
+    // 锚定「距底距离」而非绝对 scrollTop：流式追加会让内容变高，
+    // 若只记旧像素位置，新高度下会被推到一个不相关的地方（表现为"跳到很上面"）。
+    // 保持距底不变则视觉位置始终稳定；贴着底部时自然跟到底。
+    const distBottom = box.scrollHeight - box.scrollTop - box.clientHeight;
+    const nearBottom = distBottom < 140;
     renderStatic();
     renderLive();
-    box.scrollTop = nearBottom ? box.scrollHeight : prevTop;
+    box.scrollTop = nearBottom ? box.scrollHeight : Math.max(0, box.scrollHeight - box.clientHeight - distBottom);
     syncSend();
     ensureTicker();
+  }
+
+  /** 面板头部显示当前生效助手的名字与头像（来自记忆箱），切助手后实时更新 */
+  let lastHeadSig = '';
+  function paintHead() {
+    const head = root.querySelector('#agentHeadAvatar');
+    const nameEl = root.querySelector('#agentMindName');
+    if (!head || !nameEl) return;
+    const box = ctx.mindBox || {};
+    const mind = (box.minds || []).find((m) => m.id === box.activeMindId) || (box.minds || [])[0];
+    const av = mind && mind.avatar;
+    const def = box.defaultAvatar || '/img/avatar-lucy.png';
+    let html;
+    if (av && av.startsWith('data:')) html = `<img class="head-avatar-img" src="${esc(av)}" alt="">`;
+    else if (av && /^\p{Extended_Pictographic}/u.test(String(av).trim())) html = `<span class="head-avatar-emoji">${esc(av)}</span>`;
+    else html = `<img class="head-avatar-img" src="${esc(def)}" alt="" data-fallback="🤖">`;
+    const sig = (mind ? mind.name : '') + '|' + html;
+    if (sig === lastHeadSig) return;
+    lastHeadSig = sig;
+    head.innerHTML = html;
+    nameEl.textContent = mind ? mind.name : '';
+    const img = head.querySelector('img[data-fallback]');
+    if (img) img.addEventListener('error', () => {
+      const s = document.createElement('span');
+      s.className = 'head-avatar-emoji';
+      s.textContent = img.dataset.fallback;
+      if (img.parentNode) img.replaceWith(s);
+    });
+  }
+
+  /** 「一键到底部」：把对话流直接拉到最新 */
+  function scrollToBottom() {
+    const box = root.querySelector('#agentMsgs');
+    if (box) box.scrollTop = box.scrollHeight;
   }
 
   /**

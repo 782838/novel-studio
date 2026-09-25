@@ -2,6 +2,7 @@
 import api from './api.js';
 import * as V from './views.js';
 import { createAgent, openSettings } from './agent.js';
+import { openMinds } from './minds.js';
 import { initUpdate } from './update.js';
 import { esc, openForm, openModal, openConfirm, closeModal, toast } from './ui.js';
 
@@ -42,7 +43,9 @@ const state = {
   data: emptyBundle(),
   view: 'dashboard',
   sel: { nodeId: null, chapterId: null, charGraph: false, focusChar: null, query: '' },
-  collapsed: new Set()
+  collapsed: new Set(),
+  // 「AI 助手记忆箱」：全局的助手档案（名字/头像/人设/记忆条），不绑定某一部作品
+  mindBox: { minds: [], activeMindId: null, limits: {}, defaultAvatar: '/img/avatar-lucy.png' }
 };
 
 function emptyBundle() {
@@ -126,6 +129,12 @@ const ctx = {
   aiTask(title, opts) { toggleAgent(true); return agent.beginTask(title, opts); },
   toggleAgent,
   refreshProjects: () => loadProjects(),
+  get mindBox() { return state.mindBox; },
+  /** 记忆箱有变动（新建/改名/换头像/改记忆/切换）后刷新，助手面板会跟着变 */
+  refreshMinds: async () => {
+    state.mindBox = await api.minds();
+    agent.paint();
+  },
   refreshSettings: async () => {
     state.settings = await api.settings();
     // 顶栏徽章只在启动时设置过一次，中途保存 Key 会一直显示"演示模式"——这里同步刷新
@@ -778,6 +787,8 @@ async function boot() {
   try {
     state.meta = await api.meta();
     state.settings = await api.settings();
+    // 记忆箱：首次进入时服务端会把旧的人设迁移成内置「默认助手」
+    state.mindBox = await api.minds();
   } catch (err) {
     document.body.innerHTML = `<div style="padding:40px;font:14px/1.8 system-ui">服务未就绪：${esc(err.message)}</div>`;
     return;
@@ -797,6 +808,15 @@ async function boot() {
   document.getElementById('btnExport').addEventListener('click', exportProject);
   document.getElementById('btnImport').addEventListener('click', importProject);
   document.getElementById('btnSettings').addEventListener('click', () => openSettings(ctx));
+  document.getElementById('btnMinds').addEventListener('click', () => openMinds(ctx));
+  document.getElementById('btnReload').addEventListener('click', async () => {
+    try {
+      await api.reload();   // 后端从磁盘重新读取
+      if (state.projectId) await ctx.reload();   // 有作品就重新拉取并重绘
+      else renderSidebar();
+      toast('已刷新，外部修改已生效', 'success');
+    } catch (err) { toast('刷新失败：' + (err && err.message || err), 'error'); }
+  });
   document.getElementById('btnToggleAgent').addEventListener('click', () => toggleAgent());
 
   const statusChip = document.getElementById('statusChip');

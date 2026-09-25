@@ -1361,6 +1361,12 @@ body.agent-open.agent-full .agent-input textarea { max-height: 34vh; }
 .head-avatar-img, .head-avatar-emoji { font-size: 15px; }
 
 /* 记忆箱总开关 */
+.mind-beta-banner {
+  display: flex; align-items: center; gap: 8px;
+  background: #fff4e5; border: 1px solid #f0a24b; color: #8a4b08;
+  font-weight: 700; font-size: 13px; line-height: 1.5;
+  padding: 10px 12px; border-radius: 10px; margin: 2px 2px 12px;
+}
 .mind-top { padding: 2px 2px 12px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
 .switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
 .switch input { position: absolute; opacity: 0; width: 0; height: 0; }

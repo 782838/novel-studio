@@ -76,6 +76,7 @@ export async function openMinds(ctx) {
     width: 740,
     footer: false,
     html: `
+      <div class="mind-beta-banner">⚠️ 测试内容，未完善 —— 建议使用其他 agent 作为外置大脑</div>
       <div class="mind-top">
         <label class="switch">
           <input type="checkbox" id="mindEnabled" ${(box.mindBoxEnabled !== false) ? 'checked' : ''}>

@@ -720,6 +720,9 @@ function charCard(c, d, lineById = new Map()) {
   const rels = d.relations.filter((r) => r.fromId === c.id || r.toId === c.id).length;
   const myLines = (Array.isArray(c.lineIds) ? c.lineIds : []).map((id) => lineById.get(id)).filter(Boolean);
   const mot = String(c.motivation || c.personality || '').trim();
+  const alias = String(c.alias || '').trim();
+  // 卡片第三行：优先显示别名，没有就退而显示动机，让卡片不止「名字 + 定位」那么干
+  const desc = alias ? `别名：${alias}` : mot;
   const key = [c.name, c.alias, c.role, mot, ...myLines.map((l) => l.name)].filter(Boolean).join(' ');
   return `
     <article class="char-card${c.pinned ? ' pinned' : ''}${c.done ? ' is-off' : ''}" data-id="${c.id}"
@@ -729,13 +732,14 @@ function charCard(c, d, lineById = new Map()) {
         <div class="ch-top">
           <b>${esc(c.name)}</b>
           <span class="role-badge">${esc(c.role || '未定位')}</span>
+          <span class="ch-rel" title="${rels} 组关系">🔗 ${rels}</span>
         </div>
         <div class="ch-sub">
           ${myLines.length
-      ? `<span class="ch-lines">${myLines.map((l) => `<i class="ch-dot" style="background:${esc(l.color || '#6b8afd')}" title="线路：${esc(l.name)}"></i>`).join('')}<em>${esc(myLines.map((l) => l.name).join('、'))}</em></span>`
+      ? `<span class="ch-lines" title="线路：${esc(myLines.map((l) => l.name).join('、'))}">${myLines.map((l) => `<i class="ch-dot" style="background:${esc(l.color || '#6b8afd')}"></i>`).join('')}<em>${esc(myLines.map((l) => l.name).join('、'))}</em></span>`
       : '<span class="ch-noline">未绑线路</span>'}
-          <span class="ch-rel" title="${rels} 组关系">🔗 ${rels}</span>
         </div>
+        ${desc ? `<div class="ch-desc" title="${esc(desc)}">${esc(desc)}</div>` : ''}
       </div>
       <div class="ch-acts">
         <button class="pin-btn${c.pinned ? ' on' : ''}" data-pin="${c.id}" title="${c.pinned ? '取消置顶' : '置顶'}" aria-label="置顶">📌</button>

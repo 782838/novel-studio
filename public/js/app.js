@@ -187,6 +187,50 @@ function toggleAgent(open) {
   if (on) agent.paint();
 }
 
+/* ------------------------------------------------- 选择状态记忆（按作品）
+
+   上次停在哪个页面、选了哪条线路/哪个大纲节点/哪一章、树折叠了哪些——
+   这些以前只活在内存里，退出软件就全丢。桌面端又不能用 localStorage 存
+   （随机端口 = 随机源，见 persistUi 注释），所以统一落到服务端 settings.ui。
+   按 projectId 分别存，换一部作品就回到那部作品自己的上次阅读位置。     */
+
+/** 把「当前作品 + 当前视图 + 当前选择 + 折叠状态」快照写入偏好（render() 里自动调） */
+function rememberUi() {
+  if (!state.projectId) return;
+  const s = state.sel;
+  const mem = {
+    view: state.view,
+    sel: { nodeId: s.nodeId, chapterId: s.chapterId, charGraph: !!s.charGraph,
+           focusChar: s.focusChar, charLine: s.charLine || '' },
+    collapsed: [...state.collapsed]
+  };
+  const selMem = { ...(state.ui.selMem || {}) };
+  const prev = selMem[state.projectId];
+  // 值没变就不发请求（每次重绘都会走到这里，不能白白打盘）
+  if (prev && JSON.stringify(prev) === JSON.stringify(mem)) return;
+  selMem[state.projectId] = mem;
+  persistUi({ selMem });
+}
+
+/** 打开作品时回填上次的位置；已删除的 id 自动作废，回落到默认视图 */
+function restoreSelection(id) {
+  const mem = state.ui.selMem && state.ui.selMem[id];
+  if (!mem) return;
+  const d = state.data;
+  const keep = (v, coll) => (v && d[coll] && d[coll].some((x) => x.id === v) ? v : null);
+  const line = mem.sel && mem.sel.charLine;
+  state.sel = {
+    nodeId: keep(mem.sel && mem.sel.nodeId, 'outline'),
+    chapterId: keep(mem.sel && mem.sel.chapterId, 'chapters'),
+    charGraph: Boolean(mem.sel && mem.sel.charGraph),
+    focusChar: keep(mem.sel && mem.sel.focusChar, 'characters'),
+    charLine: line === '__none__' ? '__none__' : (keep(line, 'lines') || ''),
+    query: ''                                   // 搜索词属于一次性输入，不跨重启恢复
+  };
+  state.collapsed = new Set(Array.isArray(mem.collapsed) ? mem.collapsed : []);
+  if (mem.view && VIEWS[mem.view]) state.view = mem.view;
+}
+
 function askAI(text) {
   toggleAgent(true);
   const input = document.getElementById('agentInput');
@@ -264,6 +308,7 @@ function render() {
   el.innerHTML = view.html;
   restoreScroll(el, saved);
   if (view.mount) view.mount(el, ctx);
+  rememberUi();   // 每次重绘后把「页面 + 选择 + 折叠」快照落盘（值没变不发请求）
 }
 
 function renderSidebar() {
@@ -402,6 +447,12 @@ async function deleteCurrentProject() {
       }
       await api.deleteProject(p.id);
       toast(`《${p.title}》已删除`, 'success');
+      // 顺手清掉这部作品的「上次位置」记忆，避免 selMem 里留孤儿键
+      if (state.ui && state.ui.selMem && state.ui.selMem[p.id]) {
+        const selMem = { ...state.ui.selMem };
+        delete selMem[p.id];
+        persistUi({ selMem });
+      }
       const rest = state.projects.filter((x) => x.id !== p.id);
       await selectProject(rest.length ? rest[0].id : null, true);
     }
@@ -417,6 +468,7 @@ async function selectProject(id, reloadProjects = false) {  state.projectId = id
   if (id) {
     try {
       state.data = { ...emptyBundle(), ...await api.getProject(id) };
+      restoreSelection(id);   // 回到上次离开这部作品时的页面与选择
     } catch (err) {
       toast(`打开作品失败：${err.message}`, 'error');
       state.projectId = null;

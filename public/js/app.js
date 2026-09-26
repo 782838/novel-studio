@@ -4,7 +4,7 @@ import * as V from './views.js';
 import { createAgent, openSettings } from './agent.js';
 import { openMinds } from './minds.js';
 import { initUpdate } from './update.js';
-import { esc, openForm, openModal, openConfirm, closeModal, toast } from './ui.js';
+import { esc, openForm, openModal, openConfirm, closeModal, closeTopModal, toast } from './ui.js';
 
 const NAV = [
   { key: 'dashboard', icon: '◎', label: '总览' },
@@ -38,11 +38,13 @@ const VIEWS = {
 const state = {
   meta: { typeLabel: {}, statusLabel: {}, lineLabel: {} },
   settings: {},
+  // 界面偏好的内存镜像（对应服务端 settings.ui）：字号、上次作品、助手面板状态…
+  ui: {},
   projects: [],
   projectId: null,
   data: emptyBundle(),
   view: 'dashboard',
-  sel: { nodeId: null, chapterId: null, charGraph: false, focusChar: null, query: '' },
+  sel: { nodeId: null, chapterId: null, charGraph: false, focusChar: null, charLine: '', query: '' },
   collapsed: new Set(),
   // 「AI 助手记忆箱」：全局的助手档案（名字/头像/人设/记忆条），不绑定某一部作品
   mindBox: { minds: [], activeMindId: null, limits: {}, defaultAvatar: '/img/avatar-lucy.png' }
@@ -150,12 +152,38 @@ const ctx = {
 
 let agent = null;
 
+/**
+ * 界面偏好的唯一持久化出口。
+ * 桌面端本地服务的端口是每次启动随机分配的（electron/main.js: NOVEL_PORT='0'），
+ * 而 localStorage 以「协议+主机+端口」为源隔离存放——端口一换，旧存储就找不到了。
+ * 所以字号 / 上次作品 / 助手面板状态这类偏好一律写进服务端 settings.ui（userData/store.json），
+ * 只有它跟端口无关、能真正跨重启留存。localStorage 继续当会话内快取，两者并存不冲突。
+ * 合并写入 + 防抖，避免连点 A＋/A－ 时狂发请求。
+ */
+let uiSaveTimer = null;
+let uiPending = {};
+function persistUi(patch) {
+  if (!patch) return;
+  state.ui = { ...(state.ui || {}), ...patch };
+  uiPending = { ...uiPending, ...patch };
+  clearTimeout(uiSaveTimer);
+  uiSaveTimer = setTimeout(() => {
+    const send = uiPending;
+    uiPending = {};
+    // 只发这一次改动的键：服务端按 key 合并，避免把别处（如字号由 views.js 直接写盘）
+    // 刚改好的值用陈旧的整份快照盖回去。
+    const p = api.saveSettings({ ui: send });
+    if (p && p.catch) p.catch(() => { /* 写失败也不该打断写作 */ });
+  }, 220);
+}
+
 function toggleAgent(open) {
   const panel = document.getElementById('agentPanel');
   const on = open === undefined ? !panel.classList.contains('open') : open;
   panel.classList.toggle('open', on);
   document.body.classList.toggle('agent-open', on);
   localStorage.setItem(LS_AGENT, on ? '1' : '0');
+  persistUi({ agentOpen: on });
   if (on) agent.paint();
 }
 
@@ -381,9 +409,10 @@ async function deleteCurrentProject() {
 }
 
 async function selectProject(id, reloadProjects = false) {  state.projectId = id;
-  state.sel = { nodeId: null, chapterId: null, charGraph: false, focusChar: null, query: '' };
+  state.sel = { nodeId: null, chapterId: null, charGraph: false, focusChar: null, charLine: '', query: '' };
   state.collapsed = new Set();
   localStorage.setItem(LS_PROJECT, id || '');
+  persistUi({ lastProject: id || '' });
   if (reloadProjects) await loadProjects();
   if (id) {
     try {
@@ -392,6 +421,7 @@ async function selectProject(id, reloadProjects = false) {  state.projectId = id
       toast(`打开作品失败：${err.message}`, 'error');
       state.projectId = null;
       localStorage.setItem(LS_PROJECT, '');
+      persistUi({ lastProject: '' });
     }
     agent.paint();
   }
@@ -796,6 +826,11 @@ async function boot() {
   try {
     state.meta = await api.meta();
     state.settings = await api.settings();
+    // 界面偏好存在服务端（与端口无关），启动时取回并立刻套用——
+    // 这正是「全屏写作字号改完、重开软件又要重调」的解药。
+    state.ui = (state.settings && state.settings.ui) || {};
+    const savedFont = Number(state.ui.editorFont);
+    if (Number.isFinite(savedFont) && savedFont > 0) V.applyEditorFont(savedFont, false);
     // 记忆箱：首次进入时服务端会把旧的人设迁移成内置「默认助手」
     state.mindBox = await api.minds();
   } catch (err) {
@@ -806,7 +841,7 @@ async function boot() {
   agent = createAgent(ctx);
 
   await loadProjects();
-  const remembered = localStorage.getItem(LS_PROJECT);
+  const remembered = (state.ui && state.ui.lastProject) || localStorage.getItem(LS_PROJECT);
   const target = state.projects.find((p) => p.id === remembered) || state.projects[0];
 
   const sel = document.getElementById('projectSelect');
@@ -834,20 +869,33 @@ async function boot() {
   statusChip.textContent = state.settings.hasKey ? `模型 ${statusLabel || ''}` : '演示模式';
   statusChip.className = `status-chip ${state.settings.hasKey ? 'on' : 'off'}`;
 
+  // 把界面偏好的读写口暴露给 update.js 等模块（「跳过此版本」也是同一类端口失效问题）。
+  // 必须在 initUpdate 之前挂上——它启动时会立刻读一次 skip 偏好。
+  window.__novelStudio = window.__novelStudio || {};
+  window.__novelStudio.ui = {
+    get: (k) => (state.ui ? state.ui[k] : undefined),
+    set: (patch) => persistUi(patch)
+  };
+
   // 版本检测：进入软件自动查一次；顶栏「检测更新」按钮可手动再查
   const updateApi = initUpdate({ current: (state.meta && state.meta.version) || '' });
-  window.__novelStudio = window.__novelStudio || {};
   window.__novelStudio.update = updateApi;
 
-  if (localStorage.getItem(LS_AGENT) !== '0') toggleAgent(true);
+  // 助手面板开关：优先读服务端偏好，没存过再回落到 localStorage（默认打开）
+  const agentOpenPref = (state.ui && state.ui.agentOpen !== undefined)
+    ? state.ui.agentOpen
+    : (localStorage.getItem(LS_AGENT) !== '0');
+  if (agentOpenPref) toggleAgent(true);
 
   if (target) await selectProject(target.id);
   else render();
 
   window.addEventListener('keydown', (e) => {
-    // Esc 退出全屏写作（沉浸写作模式下）
-    if (e.key === 'Escape' && document.body.classList.contains('writing-full')) {
-      V.setWritingFull(false);
+    if (e.key === 'Escape') {
+      // Esc = 逐层「返回」，让弹窗/全屏之间来回切换更连贯：
+      // 1) 先关最上层弹窗（角色档案、表单、确认框…）  2) 再退掉沉浸写作全屏
+      if (closeTopModal()) { e.preventDefault(); return; }
+      if (document.body.classList.contains('writing-full')) { V.setWritingFull(false); return; }
       return;
     }
     if ((e.ctrlKey || e.metaKey) && e.key === '\\') { e.preventDefault(); toggleAgent(); }

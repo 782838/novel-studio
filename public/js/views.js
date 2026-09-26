@@ -506,7 +506,19 @@ export function characters(ctx) {
   const d = ctx.data;
   const graph = ctx.sel.charGraph;
   const focus = ctx.sel.focusChar;
-  const list = d.characters.slice().sort((a, b) => {
+  const lineFilter = ctx.sel.charLine || '';
+  const lines = d.lines.slice().sort(byOrder);
+  const lineById = new Map(lines.map((l) => [l.id, l]));
+
+  // 线路绑定筛选：选了某条线，就只留这条线需要的角色（没勾它的隐藏）；选「未绑定」列出还没挂线的
+  const onLine = (c) => {
+    if (!lineFilter) return true;
+    const ids = Array.isArray(c.lineIds) ? c.lineIds : [];
+    if (lineFilter === '__none__') return ids.length === 0;
+    return ids.includes(lineFilter);
+  };
+
+  const list = d.characters.filter(onLine).sort((a, b) => {
     const pin = (x) => (x.pinned ? 0 : 1);
     if (pin(a) !== pin(b)) return pin(a) - pin(b);
     const dn = (x) => (x.done ? 1 : 0);
@@ -514,7 +526,16 @@ export function characters(ctx) {
     return byRecent(a, b);
   });
 
-  const focusChar = focus ? d.characters.find((c) => c.id === focus) : null;
+  const focusChar = focus ? list.find((c) => c.id === focus) : null;
+  // 关系图也跟着筛选：只画在场角色、以及两端都在场的关系（否则被隐藏的人还在图里连来连去）
+  const graphIds = new Set(list.map((c) => c.id));
+  const graphData = lineFilter
+    ? { ...d, characters: list, relations: d.relations.filter((r) => graphIds.has(r.fromId) && graphIds.has(r.toId)) }
+    : d;
+
+  const lineName = lineFilter === '__none__'
+    ? '未绑定线路'
+    : (lineFilter ? ((lineById.get(lineFilter) || {}).name || '线路') : '');
 
   return {
     html: `
@@ -523,30 +544,50 @@ export function characters(ctx) {
       `<button class="btn primary sm" data-act="new">＋ 新建角色</button>
              <button class="btn ghost sm" data-act="ai">✨ AI 生成角色</button>
              <button class="btn ghost sm" data-act="export-cards">📄 导出人物卡</button>`,
-      `<label class="switch-inline"><input type="checkbox" id="toggleGraph" ${graph ? 'checked' : ''}/> 关系图</label>
+      `${lines.length ? `<label class="line-filter" title="只看这条线需要的角色；不选则显示全部">
+               <span>线路</span>
+               <select id="charLineFilter">
+                 <option value="">全部角色</option>
+                 ${lines.map((l) => `<option value="${esc(l.id)}" ${lineFilter === l.id ? 'selected' : ''}>${esc(l.name)}${l.done ? ' · 已完成' : ''}</option>`).join('')}
+                 <option value="__none__" ${lineFilter === '__none__' ? 'selected' : ''}>未绑定线路</option>
+               </select>
+             </label>` : ''}
+             <label class="switch-inline"><input type="checkbox" id="toggleGraph" ${graph ? 'checked' : ''}/> 关系图</label>
              <input class="search" id="charSearch" placeholder="搜索角色…" value="${esc(ctx.sel.query || '')}" />`
     )}
 
+        ${lineFilter ? `<div class="filter-note">
+          <span>只看「<b>${esc(lineName)}</b>」需要的角色 · ${list.length} 个</span>
+          <button class="btn ghost xs" id="clearLineFilter">✕ 显示全部</button>
+        </div>` : ''}
+
         ${graph
-        ? `<section class="panel graph-panel">
+        ? (graphData.characters.length
+          ? `<section class="panel graph-panel">
              <div class="graph-bar">
                ${focusChar
                  ? `<span>🕸 聚焦：<b>${esc(focusChar.name)}</b> 的关系网</span><button class="btn ghost xs" id="clearFocus">✕ 查看全部</button>`
                  : `<span class="muted">点击任意节点，查看该角色的关系网与联系人</span>`}
              </div>
              <div class="graph-body">
-               <div class="graph-svg-wrap">${relationGraph(d, focus)}</div>
+               <div class="graph-svg-wrap">${relationGraph(graphData, focusChar ? focus : null)}</div>
                ${focusChar ? egoSide(d, focusChar) : ''}
              </div>
            </section>`
-        : (list.length ? `<div class="char-grid">${list.map((c) => charCard(c, d)).join('')}</div>`
-          : emptyBox('还没有角色。先建一个主角，或者让助手替你把人物补齐。', '<button class="btn primary sm" data-act="new">＋ 新建角色</button>'))}
+          : emptyBox('这条线路下还没有绑定的角色，先给角色勾上所属线路。'))
+        : (list.length
+          ? `<div class="char-grid">${list.map((c) => charCard(c, d, lineById)).join('')}</div>`
+          : emptyBox(
+            lineFilter
+              ? (lineFilter === '__none__' ? '所有角色都已经绑定了线路。' : '这条线路下还没有绑定角色。打开角色卡，在「所属线路」里勾上这条线即可。')
+              : '还没有角色。先建一个主角，或者让助手替你把人物补齐。',
+            lineFilter ? '' : '<button class="btn primary sm" data-act="new">＋ 新建角色</button>'))}
       </div>`,
 
     mount(root, c) {
       const newBtn = () => openForm({
         title: '新建角色', width: 620,
-        fields: characterFields(),
+        fields: characterFields(d.lines),
         okText: '创建',
         onSubmit: async (v) => {
           if (!v.name) { toast('请填写姓名', 'error'); return false; }
@@ -587,12 +628,27 @@ export function characters(ctx) {
         c.render();
       });
 
+      // 线路筛选：选一条线就只看这条线需要的角色
+      const lineSel = root.querySelector('#charLineFilter');
+      if (lineSel) lineSel.addEventListener('change', () => {
+        c.sel.charLine = lineSel.value;
+        c.sel.query = '';                 // 一起清掉搜索，避免「换了线路却看不到人」的困惑
+        c.sel.focusChar = null;
+        c.render();
+      });
+      const clrFilter = root.querySelector('#clearLineFilter');
+      if (clrFilter) clrFilter.addEventListener('click', () => {
+        c.sel.charLine = '';
+        c.sel.focusChar = null;
+        c.render();
+      });
+
       const search = root.querySelector('#charSearch');
       search.addEventListener('input', () => {
         c.sel.query = search.value;
         const q = search.value.trim().toLowerCase();
         root.querySelectorAll('.char-card').forEach((el) => {
-          const hay = el.textContent.toLowerCase();
+          const hay = (el.dataset.key || el.textContent).toLowerCase();
           el.style.display = !q || hay.includes(q) ? '' : 'none';
         });
       });
@@ -639,12 +695,13 @@ export function characters(ctx) {
   };
 }
 
-function characterFields() {
+function characterFields(lines = []) {
   return [
     { key: 'name', label: '姓名' },
     { key: 'role', label: '定位', type: 'select', options: ['主角', '重要配角', '配角', '反派', '群像'], default: '配角' },
     { key: 'alias', label: '别名 / 称号' },
     { key: 'age', label: '年龄' },
+    { key: 'lineIds', label: '所属线路', type: 'checks', emptyText: '还没有线路（先去「线路」页建一条）', hint: '这条线需要他出场就勾上；角色页可按线路筛选', options: lines.map((l) => [l.id, l.name, l.color || '#6b8afd']) },
     { key: 'appearance', label: '外貌特征', type: 'textarea', rows: 2 },
     { key: 'personality', label: '性格层次', type: 'textarea', rows: 2, hint: '表面与内里的反差' },
     { key: 'motivation', label: '核心动机', type: 'textarea', rows: 2, hint: '他到底想要什么' },
@@ -654,41 +711,53 @@ function characterFields() {
   ];
 }
 
-function charCard(c, d) {
+/**
+ * 角色卡（紧凑型）。
+ * 角色一多，大卡片就变成一堵墙——这里压成「两行 + 右侧操作」的小格子：
+ * 第 1 行 名字 + 定位，第 2 行 所属线路 + 关系数；动机等长文本走 title 悬停看。
+ */
+function charCard(c, d, lineById = new Map()) {
   const rels = d.relations.filter((r) => r.fromId === c.id || r.toId === c.id).length;
+  const myLines = (Array.isArray(c.lineIds) ? c.lineIds : []).map((id) => lineById.get(id)).filter(Boolean);
+  const mot = String(c.motivation || c.personality || '').trim();
+  const key = [c.name, c.alias, c.role, mot, ...myLines.map((l) => l.name)].filter(Boolean).join(' ');
   return `
-    <article class="char-card${c.pinned ? ' pinned' : ''}${c.done ? ' done-item' : ''}" data-id="${c.id}">
-      <header>
-        <span class="avatar" style="background:${esc(c.color || '#6b8afd')}">${esc((c.name || '?').slice(0, 1))}</span>
-        <div class="char-head-text">
+    <article class="char-card${c.pinned ? ' pinned' : ''}${c.done ? ' is-off' : ''}" data-id="${c.id}"
+      data-key="${esc(key)}" title="${esc(mot || '（动机待补充）')}">
+      <span class="avatar" style="background:${esc(c.color || '#6b8afd')}">${esc((c.name || '?').slice(0, 1))}</span>
+      <div class="ch-main">
+        <div class="ch-top">
           <b>${esc(c.name)}</b>
           <span class="role-badge">${esc(c.role || '未定位')}</span>
         </div>
-      </header>
-      <span class="char-card-btns">
-        <button class="pin-btn${c.pinned ? ' on' : ''}" data-pin="${c.id}" title="${c.pinned ? '取消置顶' : '置顶'}" aria-label="置顶">📌 ${c.pinned ? '已置顶' : '置顶'}</button>
-        <button class="done-btn${c.done ? ' on' : ''}" data-done="${c.id}" title="${c.done ? '标记未完成' : '标记已完成'}" aria-label="已完成">${c.done ? '✓ 已完成' : '标记完成'}</button>
-      </span>
-      <p class="char-line">${esc((c.motivation || c.personality || '（动机待补充）'))}</p>
-      <footer>
-        ${c.arc ? `<span title="弧光">↗ ${esc(c.arc.slice(0, 18))}</span>` : ''}
-        <span title="关系数">🔗 ${rels}</span>
-      </footer>
+        <div class="ch-sub">
+          ${myLines.length
+      ? `<span class="ch-lines">${myLines.map((l) => `<i class="ch-dot" style="background:${esc(l.color || '#6b8afd')}" title="线路：${esc(l.name)}"></i>`).join('')}<em>${esc(myLines.map((l) => l.name).join('、'))}</em></span>`
+      : '<span class="ch-noline">未绑线路</span>'}
+          <span class="ch-rel" title="${rels} 组关系">🔗 ${rels}</span>
+        </div>
+      </div>
+      <div class="ch-acts">
+        <button class="pin-btn${c.pinned ? ' on' : ''}" data-pin="${c.id}" title="${c.pinned ? '取消置顶' : '置顶'}" aria-label="置顶">📌</button>
+        <button class="done-btn${c.done ? ' on' : ''}" data-done="${c.id}" title="${c.done ? '点击重新上线' : '点击下线：他的戏份已经演完'}" aria-label="下线">${c.done ? '已下线' : '下线'}</button>
+      </div>
     </article>`;
 }
 
 function relationGraph(d, focusId) {
   const chars = d.characters;
   if (!chars.length) return emptyBox('还没有角色');
-  const W = 960; const H = 460;
+  // viewBox 要贴近实际渲染宽度：原来按 960 宽画，被容器压到一半后
+  // 圆圈和名字小得几乎看不清（左边一撮小黑点、右边一块大卡片，比例就是这么崩的）
+  const W = 560; const H = 400;
   const cx = W / 2; const cy = H / 2;
-  const R = Math.min(cx, cy) - 70;
+  const RX = cx - 62; const RY = cy - 56;
   const pos = new Map();
   const n = chars.length;
   chars.forEach((ch, i) => {
     if (n === 1) { pos.set(ch.id, { x: cx, y: cy }); return; }
     const a = -Math.PI / 2 + (i * 2 * Math.PI) / n;
-    pos.set(ch.id, { x: cx + Math.cos(a) * R, y: cy + Math.sin(a) * R * 0.82 });
+    pos.set(ch.id, { x: cx + Math.cos(a) * RX, y: cy + Math.sin(a) * RY });
   });
 
   // 聚焦时计算关系网节点集合（自己 + 直接相连的人）
@@ -877,7 +946,7 @@ export function openCharacter(ctx, charId) {
 
     // 总编辑：一次改完整张角色卡（弹窗底栏「编辑」与字段展开里的「编辑」共用）
     const editForm = () => openForm({
-      title: `编辑 ${c.name}`, width: 620, fields: characterFields(), values: c, okText: '保存',
+      title: `编辑 ${c.name}`, width: 620, fields: characterFields(ctx.data.lines), values: c, okText: '保存',
       onSubmit: async (v) => {
         await ctx.patch('characters', charId, v);
         toast('已保存', 'success');
@@ -1014,11 +1083,20 @@ export function openCharacter(ctx, charId) {
       });
     };
 
+    const myLineChips = (Array.isArray(c.lineIds) ? c.lineIds : [])
+      .map((id) => ctx.data.lines.find((l) => l.id === id)).filter(Boolean);
+
     openModal({
       title: c.name, subtitle: c.role || '未定位', width: 860,
       html: `
         <div class="char-detail">
           <div class="cd-left">
+            <div class="cd-field">
+              <span>所属线路</span>
+              <p>${myLineChips.length
+          ? myLineChips.map((l) => `<span class="ch-lines"><i class="ch-dot" style="background:${esc(l.color || '#6b8afd')}"></i>${esc(l.name)}</span>`).join('')
+          : '<i class="muted">未绑定 —— 点「编辑」在「所属线路」里勾选</i>'}</p>
+            </div>
             ${[['别名', 'alias'], ['年龄', 'age'], ['外貌', 'appearance'], ['性格', 'personality'],
         ['核心动机', 'motivation'], ['弱点', 'flaw'], ['人物弧光', 'arc'], ['转折节点', 'beatNote']]
         .map(([k, key]) => {
@@ -1382,7 +1460,12 @@ export const FONT_MIN = 13;
 export const FONT_MAX = 30;
 export const FONT_DEFAULT = 17;
 
+// 会话内的「权威字号」。必须记在内存里：桌面端 localStorage 会随本地服务端口变化而清空，
+// 只认 localStorage 的话，一旦打开/新建章节就会退回默认 17px，把启动时从服务端取回的字号当场盖掉。
+let currentFont = null;
+
 export function editorFontSize() {
+  if (currentFont != null) return currentFont;
   try {
     const v = Number(localStorage.getItem(FS_KEY));
     if (Number.isFinite(v) && v >= FONT_MIN && v <= FONT_MAX) return Math.round(v);
@@ -1392,6 +1475,7 @@ export function editorFontSize() {
 
 export function applyEditorFont(px, persist = true) {
   const v = Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(Number(px) || FONT_DEFAULT)));
+  currentFont = v;
   if (typeof document !== 'undefined') {
     document.documentElement.style.setProperty('--editor-fs', `${v}px`);
     const lab = document.getElementById('fontSizeVal');
@@ -1399,7 +1483,12 @@ export function applyEditorFont(px, persist = true) {
     document.querySelectorAll('[data-act="font-dec"]').forEach((b) => { b.disabled = v <= FONT_MIN; });
     document.querySelectorAll('[data-act="font-inc"]').forEach((b) => { b.disabled = v >= FONT_MAX; });
   }
-  if (persist) { try { localStorage.setItem(FS_KEY, String(v)); } catch (e) { /* 忽略 */ } }
+  if (persist) {
+    // localStorage 在桌面端靠不住：本地服务端口每次启动都不同，「源」一变这份存储就等于换新，
+    // 字号重启后必丢。真正要落盘的是服务端 settings.ui（userData/store.json，与端口无关）。
+    try { localStorage.setItem(FS_KEY, String(v)); } catch (e) { /* 忽略 */ }
+    try { const p = api.saveSettings({ ui: { editorFont: v } }); if (p && p.catch) p.catch(() => { /* 忽略 */ }); } catch (e) { /* 忽略 */ }
+  }
   return v;
 }
 
@@ -1409,7 +1498,8 @@ if (typeof document !== 'undefined') {
   try {
     const saved = Number(localStorage.getItem(FS_KEY));
     if (Number.isFinite(saved) && saved >= FONT_MIN && saved <= FONT_MAX) {
-      document.documentElement.style.setProperty('--editor-fs', `${Math.round(saved)}px`);
+      currentFont = Math.round(saved);
+      document.documentElement.style.setProperty('--editor-fs', `${currentFont}px`);
     }
   } catch (e) { /* 忽略 */ }
 }

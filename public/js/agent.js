@@ -1,6 +1,6 @@
 'use strict';
 import api from './api.js';
-import { esc, md, openModal, openForm, openConfirm, toast } from './ui.js';
+import { esc, md, openModal, openForm, openConfirm, closeTopModal, toast } from './ui.js';
 
 export const PRESETS = {
   zhipu_flash: { label: '智谱 GLM-5.3-Flash（推荐）', endpoint: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.3-flash' },
@@ -389,6 +389,8 @@ export function createAgent(ctx) {
     const on = force === undefined ? !document.body.classList.contains('agent-full') : !!force;
     fullPref = on;
     localStorage.setItem(LS_FULL, on ? '1' : '0');
+    // 同步落服务端：桌面端 localStorage 会随本地端口变化而失效，只放这里重启就丢
+    try { const p = api.saveSettings({ ui: { agentFull: on } }); if (p && p.catch) p.catch(() => { /* 忽略 */ }); } catch (_) { /* 忽略 */ }
     document.body.classList.toggle('agent-full', on);
     const b = root.querySelector('[data-act="full"]');
     if (b) {
@@ -400,8 +402,10 @@ export function createAgent(ctx) {
 
   function build() {
     built = true;
-    // 恢复「占满窗口」偏好：收起面板时会临时摘掉视觉效果，但偏好本身保留
-    fullPref = localStorage.getItem(LS_FULL) === '1';
+    // 恢复「占满窗口」偏好：收起面板时会临时摘掉视觉效果，但偏好本身保留。
+    // 优先取服务端（跨重启可靠），没存过再回落到 localStorage。
+    const svFull = (ctx && ctx.settings && ctx.settings.ui) ? ctx.settings.ui.agentFull : undefined;
+    fullPref = svFull === undefined ? localStorage.getItem(LS_FULL) === '1' : svFull === true;
     if (fullPref) document.body.classList.add('agent-full');
     root.innerHTML = `
       <div class="agent-head">
@@ -469,9 +473,11 @@ export function createAgent(ctx) {
       await ctx.reload();
       toast('已清空', 'success');
     });
-    // 全屏时 Esc 退出全屏；stopPropagation 保证不会同时触发「沉浸写作」那条 Esc
+    // 全屏时 Esc 退出全屏；stopPropagation 保证不会同时触发「沉浸写作」那条 Esc。
+    // 但若此刻压着弹窗（如「清空对话」确认框），Esc 应先只关弹窗，别把助手全屏一起退掉。
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape' || !document.body.classList.contains('agent-full')) return;
+      if (closeTopModal()) { e.stopPropagation(); return; }
       e.stopPropagation();
       toggleFull(false);
     });

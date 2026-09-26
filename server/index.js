@@ -232,6 +232,16 @@ on('PUT', '/api/settings', async ({ res, body }) => {
   if (body.useDemo !== undefined) db.settings.useDemo = !!body.useDemo;
   if (body.agentPersona !== undefined) db.settings.agentPersona = String(body.agentPersona || '').trim();
   if (body.autoApply !== undefined) db.settings.autoApply = !!body.autoApply;
+  // 界面偏好（正文字号 / 上次打开的作品 / 助手面板状态…）。
+  // 桌面端本地服务的端口是每次启动随机分配的（electron/main.js 里 NOVEL_PORT='0'），
+  // 而 renderer 的 localStorage 以「协议+主机+端口」为源隔离存放——端口一变，之前存的全找不到。
+  // 所以这类偏好必须落到这里（userData/store.json，与端口无关）才真正跨重启活下来。
+  if (body.ui !== undefined && body.ui && typeof body.ui === 'object') {
+    const cur = (db.settings.ui && typeof db.settings.ui === 'object') ? db.settings.ui : {};
+    const next = { ...cur };
+    Object.keys(body.ui).forEach((k) => { if (body.ui[k] !== undefined) next[k] = body.ui[k]; });
+    db.settings.ui = next;
+  }
   store.save();
   const list = db.settings.providers;
   const active = (db.settings.activeProvider && list.find((p) => p.id === db.settings.activeProvider))

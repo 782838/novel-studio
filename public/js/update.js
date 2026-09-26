@@ -72,11 +72,18 @@ export async function checkForUpdate(current) {
   }
 }
 
+// 「跳过此版本」也存服务端偏好：桌面端 localStorage 会随本地服务端口变化而失效，
+// 只放这里的话重启后「跳过」就白跳、又会弹一次。走 app.js 暴露的 __novelStudio.ui 钩子。
+const uiHook = () => (typeof window !== 'undefined' && window.__novelStudio && window.__novelStudio.ui) || null;
 const readSkip = () => {
+  const h = uiHook();
+  if (h && typeof h.get === 'function') { const v = h.get('skipUpdate'); if (v) return String(v); }
   try { return localStorage.getItem(SKIP_KEY) || ''; } catch (_) { return ''; }
 };
 const writeSkip = (v) => {
   try { localStorage.setItem(SKIP_KEY, String(v || '')); } catch (_) { /* 忽略 */ }
+  const h = uiHook();
+  if (h && typeof h.set === 'function') h.set({ skipUpdate: String(v || '') });
 };
 
 function fmtDate(iso) {

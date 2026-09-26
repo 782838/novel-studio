@@ -169,7 +169,24 @@ export function closeModal(el) {
   if (el && el.classList) el.classList.remove('in');
   const node = el || (modalRoot && modalRoot.lastElementChild);
   if (!node) return;
+  // 关闭时通知一次（openConfirm 靠它把悬而未决的 Promise 落成「取消」——
+  // 否则点遮罩 / ✕ / Esc 关掉时，await openConfirm(...) 会永远挂着不返回）
+  const cb = node.__onClose;
+  node.__onClose = null;
+  if (typeof cb === 'function') { try { cb(); } catch (_) { /* ignore */ } }
   setTimeout(() => node.remove(), 200);
+}
+
+/**
+ * 关掉最上层弹窗，供 Esc「逐层返回」用。
+ * 标注了 `esc:false` 的浮层（如 AI 等待浮层）不参与返回，返回 false 表示「没关任何东西」。
+ */
+export function closeTopModal() {
+  if (!modalRoot) modalRoot = document.getElementById('modalRoot');
+  const node = modalRoot && modalRoot.lastElementChild;
+  if (!node || node.__noEsc) return false;
+  closeModal(node);
+  return true;
 }
 
 /**
@@ -180,6 +197,8 @@ export function openModal(opt = {}) {
   if (!modalRoot) modalRoot = document.getElementById('modalRoot');
   const wrap = document.createElement('div');
   wrap.className = 'modal-mask';
+  if (opt.esc === false) wrap.__noEsc = true;                       // 不参与 Esc 返回（如等待浮层）
+  if (typeof opt.onClose === 'function') wrap.__onClose = opt.onClose;
   wrap.innerHTML = `
     <div class="modal" style="width:${opt.width || 560}px">
       <div class="modal-head">
@@ -230,6 +249,17 @@ export function openForm({ title, subtitle, fields = [], values = {}, okText = '
         const [val, lab] = Array.isArray(o) ? o : [o, o];
         return `<option value="${esc(val)}" ${String(v) === String(val) ? 'selected' : ''}>${esc(lab)}</option>`;
       }).join('')}</select>`;
+      // 多选：options 支持 [值, 显示名, 圆点色] 三元组；值为数组（如角色的所属线路）
+      else if (f.type === 'checks') {
+        const arr = (Array.isArray(v) ? v : String(v == null ? '' : v).split(','))
+          .map((x) => String(x)).filter(Boolean);
+        const opts = (f.options || []);
+        if (!opts.length) ctrl = `<p class="form-empty">${esc(f.emptyText || '暂无可选项')}</p>`;
+        else ctrl = `<div class="check-grid">${opts.map((o) => {
+          const [val, lab, color] = Array.isArray(o) ? o : [o, o];
+          return `<label class="check-item"><input type="checkbox" name="${f.key}" value="${esc(val)}" ${arr.includes(String(val)) ? 'checked' : ''}/><span>${color ? `<i class="dot" style="background:${esc(color)}"></i>` : ''}${esc(lab)}</span></label>`;
+        }).join('')}</div>`;
+      }
       else ctrl = `<input type="${f.type || 'text'}" ${common} value="${esc(v)}">`;
       return `<label class="field ${f.type === 'textarea' ? 'field-area' : ''}">
         <span>${esc(f.label)}${f.hint ? `<em>${esc(f.hint)}</em>` : ''}</span>
@@ -244,6 +274,11 @@ export function openForm({ title, subtitle, fields = [], values = {}, okText = '
           const form = body.querySelector('form');
           const data = {};
           fields.forEach((f) => {
+            // 多选：同名 checkbox 是一组，form.elements 取不到「全部选中项」，要单独收集
+            if (f.type === 'checks') {
+              data[f.key] = Array.from(form.querySelectorAll(`input[name="${f.key}"]:checked`)).map((x) => x.value);
+              return;
+            }
             const el = form.elements[f.key];
             if (!el) return;
             data[f.key] = f.type === 'number' ? Number(el.value) : el.value.trim();
@@ -267,12 +302,16 @@ export function openForm({ title, subtitle, fields = [], values = {}, okText = '
 
 export function openConfirm({ title = '确认操作', message, danger = false, okText = '确定' }) {
   return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
     openModal({
       title, width: 420,
       html: `<p class="confirm-text">${esc(message || '')}</p>`,
+      // 点遮罩 / ✕ / Esc 关掉一律算「取消」，别让 await 永远挂着
+      onClose: () => finish(false),
       buttons: [
-        { label: '取消', kind: 'ghost', onClick: () => resolve(false) },
-        { label: okText, kind: danger ? 'danger' : 'primary', onClick: () => resolve(true) }
+        { label: '取消', kind: 'ghost', onClick: () => finish(false) },
+        { label: okText, kind: danger ? 'danger' : 'primary', onClick: () => finish(true) }
       ],
       onMount: () => {}
     });
@@ -289,7 +328,7 @@ export function openAiWaiting({ title = 'AI 正在生成…', hint = '免费模�
   const ctrl = new AbortController();
   let stopped = false;
   const { wrap, close } = openModal({
-    title, width: 440, footer: false,
+    title, width: 440, footer: false, esc: false,   // 等待浮层不给 Esc 关（避免误退掉正在跑的请求）
     html: `
       <div class="ai-wait">
         <div class="ai-wait-row"><span class="dot-typing sm"><i></i><i></i><i></i></span><span>正在请求模型…</span></div>

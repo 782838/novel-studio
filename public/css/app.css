@@ -11,6 +11,7 @@
   --accent: #4f46e5;
   --accent-hover: #4338ca;
   --accent-soft: #eef0ff;
+  --canvas: #f4f4f4;
   --green: #0f8a6a;
   --amber: #b4690e;
   --red: #c2402f;
@@ -130,19 +131,38 @@ button { font-family: inherit; cursor: pointer; }
 
 .shell { flex: 1; display: flex; min-height: 0; }
 
+/* ---- 侧栏：列标题 + 卡片列表（与章节目录同一套「卡片」语言） ---- */
 .sidebar {
-  flex: 0 0 168px; background: var(--surface); border-right: 1px solid var(--border);
-  padding: 10px 8px; overflow-y: auto;
+  flex: 0 0 182px; background: var(--bg); border-right: 1px solid var(--border);
+  padding: 12px 10px; overflow-y: auto;
 }
+.sidebar-head {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 2px 4px 10px; margin-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+.sh-label { font-size: 12.5px; font-weight: 700; letter-spacing: .08em; color: var(--text-2); }
+.sh-book {
+  flex: 1; min-width: 0; text-align: right;
+  font-size: 10.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sidebar-cards { display: flex; flex-direction: column; gap: 6px; }
 .nav-item {
   width: 100%; display: flex; align-items: center; gap: 9px;
-  padding: 8px 10px; margin-bottom: 2px; border: none; border-radius: 8px;
-  background: transparent; color: var(--text-2); font-size: 13px; text-align: left;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px;
+  background: var(--surface); color: var(--text-2); font-size: 13px; text-align: left;
+  box-shadow: 0 1px 2px rgba(40, 34, 20, .04);
   transition: .12s;
 }
-.nav-item:hover { background: var(--surface-3); }
-.nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.nav-item[disabled] { opacity: .45; pointer-events: none; }
+.nav-item:hover {
+  border-color: var(--border-strong); color: var(--text);
+  box-shadow: var(--shadow); transform: translateY(-1px);
+}
+.nav-item.active {
+  background: var(--accent-soft); border-color: #c9cbff; color: var(--accent);
+  font-weight: 600; box-shadow: inset 3px 0 0 var(--accent);
+}
+.nav-item[disabled] { opacity: .45; pointer-events: none; box-shadow: none; }
 .nav-icon { font-size: 14px; width: 16px; text-align: center; }
 .nav-label { flex: 1; }
 .nav-count {
@@ -540,27 +560,43 @@ button { font-family: inherit; cursor: pointer; }
 
 .editor-view { display: flex; gap: 16px; padding: 18px 24px; height: calc(100vh - 54px); }
 .chapter-list {
-  flex: 0 0 236px; background: var(--surface); border: 1px solid var(--border);
+  flex: 0 0 252px; background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); display: flex; flex-direction: column; overflow: hidden;
 }
+/* 目录栏的列标题：左边是栏目名，右边是章节数，再右边新建 */
 .chapter-list-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 12.5px;
+  display: flex; align-items: center; gap: 8px;
+  padding: 11px 12px; background: var(--surface-2); border-bottom: 1px solid var(--border);
 }
-.chapter-items { overflow-y: auto; flex: 1; padding: 6px; }
-.chapter-item {
-  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
-  border-radius: 7px; cursor: pointer; font-size: 12.5px; transition: .12s;
+.clh-label { font-size: 12.5px; font-weight: 700; letter-spacing: .08em; color: var(--text-2); }
+.clh-count {
+  font-size: 10.5px; line-height: 1.7; color: var(--muted);
+  background: var(--surface-3); border-radius: 20px; padding: 0 7px;
 }
-.chapter-item:hover { background: var(--surface-3); }
-.chapter-item.active { background: var(--accent-soft); color: var(--accent); }
-.ci-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ci-words { font-size: 11px; color: var(--muted); }
+.chapter-list-head .btn { margin-left: auto; }
+.chapter-items { overflow-y: auto; flex: 1; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+/* 每一章 = 一张卡片 */
+.chapter-item.chapter-card {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); cursor: pointer; font-size: 12.5px;
+  transition: border-color .12s, box-shadow .12s, background .12s;
+}
+.chapter-item.chapter-card:hover { border-color: var(--border-strong); box-shadow: 0 1px 3px rgba(40, 34, 20, .09); }
+.chapter-item.chapter-card .status-dot { margin-top: 6px; }
+.cc-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ci-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-meta { font-size: 10.5px; color: var(--muted); }
+.chapter-item.chapter-card.active {
+  background: var(--accent-soft); border-color: #c9cbf6; color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.chapter-item.chapter-card.active .ci-title { font-weight: 700; }
+.chapter-item.chapter-card.active .cc-meta { color: #7d7ac9; }
 .chapter-group {
-  padding: 9px 10px 4px; font-size: 11px; font-weight: 600; color: var(--muted);
-  border-top: 1px dashed var(--border); margin-top: 5px;
+  padding: 8px 2px 2px; font-size: 10.5px; font-weight: 700; letter-spacing: .06em; color: var(--muted);
 }
-.chapter-group:first-child { border-top: none; margin-top: 0; padding-top: 4px; }
+.chapter-group:not(:first-child) { border-top: 1px dashed var(--border); margin-top: 6px; }
 .btn-danger-ghost { color: #b4443c; }
 .btn-danger-ghost:hover { background: #fdeceb; border-color: #e3a09a; color: #a03a33; }
 .chapter-main { flex: 1; min-width: 0; display: flex; }
@@ -568,6 +604,8 @@ button { font-family: inherit; cursor: pointer; }
   flex: 1; display: flex; flex-direction: column; background: var(--surface);
   border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 20px; min-width: 0;
 }
+/* 正文区的外层容器：全屏时它就是那张居中的白色卡片 */
+.editor-sheet { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .editor-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .editor-title {
   flex: 1; border: none; background: transparent; font-size: 19px; font-weight: 600;
@@ -586,17 +624,27 @@ button { font-family: inherit; cursor: pointer; }
   width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
   resize: vertical; background: var(--surface-2); margin-bottom: 10px; font-size: 12.5px;
 }
+/* 空章时的引导行（番茄「开新书没思路？」那一行的对应物） */
+.editor-hint {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 0 0 10px; font-size: 12.5px; color: var(--muted);
+}
+.editor-hint .eh-icon { opacity: .85; }
+.editor-hint .btn { margin-left: 2px; }
 .editor-content {
   flex: 1; width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 18px 22px;
-  resize: none; font-family: var(--serif); font-size: 16px; line-height: 2.05;
+  resize: none; font-family: var(--serif); font-size: var(--editor-fs, 16px); line-height: 2.05;
   background: var(--surface-2); letter-spacing: .3px; min-height: 320px;
 }
 
-/* ---- 全屏写作（沉浸写作模式） ---- */
+/* ---- 全屏写作（沉浸写作模式 · 番茄式画布：灰底 + 居中白卡） ---- */
 .editor-full-bar { display: none; }
-.efb-tag { font-size: 11px; color: var(--muted); }
+.efb-tag {
+  font-size: 11px; color: var(--accent); background: var(--accent-soft);
+  border-radius: 20px; padding: 2px 9px;
+}
 .efb-title { flex: 1; min-width: 0; font-family: var(--serif); font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-body.writing-full { overflow: hidden; }
+body.writing-full { overflow: hidden; background: var(--canvas); }
 body.writing-full .topbar,
 body.writing-full .sidebar,
 body.writing-full .agent-panel,
@@ -604,20 +652,43 @@ body.writing-full .chapter-list { display: none; }
 body.writing-full .editor-view { padding: 0; height: 100vh; gap: 0; }
 body.writing-full .editor {
   position: fixed; inset: 0; z-index: 50; border: none; border-radius: 0; padding: 0;
-  background: var(--surface);
+  background: var(--canvas);
 }
 body.writing-full .editor-full-bar {
   display: flex; align-items: center; gap: 12px;
-  padding: 12px 28px; border-bottom: 1px solid var(--border); background: var(--surface-2);
+  padding: 12px 28px; border-bottom: 1px solid var(--border); background: var(--surface);
 }
-body.writing-full .editor-head { padding: 16px 28px 0; margin: 0 auto 8px; width: 100%; max-width: 980px; }
+/* 正文整块收成一张居中的白卡（番茄那套：灰画布 + 白纸） */
+body.writing-full .editor-sheet {
+  width: 100%; max-width: 940px; margin: 22px auto 28px; flex: 1; min-height: 0;
+  background: var(--surface); border-radius: 12px; padding: 26px 44px 28px;
+  box-shadow: 0 1px 2px rgba(30, 25, 15, .06), 0 12px 32px rgba(30, 25, 15, .07);
+  overflow: hidden;
+}
+body.writing-full .editor-head { padding: 0; margin: 0 0 6px; width: 100%; max-width: none; }
 body.writing-full .editor-head [data-act="full"] { display: none; }
 body.writing-full .editor-tools { display: none; }
-/* 正文收成居中的窄栏：满屏一行太宽反而不利于阅读 */
-body.writing-full .editor-summary { width: 100%; max-width: 900px; margin: 0 auto; }
+body.writing-full .editor-title { font-size: 22px; }
+body.writing-full .editor-summary { width: 100%; max-width: none; margin: 0 0 10px; }
+body.writing-full .editor-hint { margin: 2px 0 12px; }
 body.writing-full .editor-content {
-  flex: 1; width: 100%; max-width: 900px; min-height: 0; margin: 12px auto 24px;
-  font-size: 16.5px; line-height: 2.1; padding: 24px 30px;
+  flex: 1; width: 100%; max-width: none; min-height: 0; margin: 0; padding: 2px 0;
+  border: none; border-radius: 0; background: var(--surface);
+  font-size: var(--editor-fs, 17px); line-height: 2.15;
+}
+body.writing-full .editor-content:focus { background: var(--surface); }
+/* 全屏顶栏的字号调节（A－ / A＋） */
+.efb-font {
+  display: flex; align-items: center; gap: 2px;
+  padding: 1px 4px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface-2);
+}
+.efb-font .btn { padding: 3px 7px; font-size: 12px; border: none; background: transparent; }
+.efb-font .btn:hover:not(:disabled) { background: var(--surface-3); }
+.efb-font .btn:disabled { opacity: .35; }
+.font-size-val {
+  min-width: 34px; text-align: center; font-size: 11px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 .result-text {
   max-height: 60vh; overflow-y: auto; background: var(--surface-2);

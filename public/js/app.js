@@ -9,7 +9,7 @@ import { esc, openForm, openModal, openConfirm, closeModal, toast } from './ui.j
 const NAV = [
   { key: 'dashboard', icon: '◎', label: '总览' },
   { key: 'outline', icon: '🗂', label: '大纲' },
-  { key: 'characters', icon: '👤', label: '角色集' },
+  { key: 'characters', icon: '👤', label: '角色卡' },
   { key: 'lines', icon: '🧵', label: '线路' },
   { key: 'chapters', icon: '📄', label: '章节' },
   { key: 'memos', icon: '🧠', label: 'AI记忆点' },
@@ -248,12 +248,21 @@ function renderSidebar() {
     notes: d.notes.length,
     materials: d.materials.length
   };
-  sidebarEl().innerHTML = NAV.map((n) => `
-    <button class="nav-item ${state.view === n.key ? 'active' : ''}" data-view="${n.key}" ${state.projectId ? '' : 'disabled'}>
-      <span class="nav-icon">${n.icon}</span>
-      <span class="nav-label">${n.label}</span>
-      ${state.projectId && counts[n.key] ? `<span class="nav-count">${counts[n.key]}</span>` : ''}
-    </button>`).join('');
+  // 侧栏顶部先给一列「列标题」，下面每一项都是一张卡片（.nav-card）
+  const bookTitle = state.projectId ? String((d.project && d.project.title) || '').trim() : '';
+  sidebarEl().innerHTML = `
+    <div class="sidebar-head" title="工作区：下面每一项都是一张卡片">
+      <span class="sh-label">工作区</span>
+      ${bookTitle ? `<span class="sh-book" title="${esc(bookTitle)}">${esc(bookTitle)}</span>` : ''}
+    </div>
+    <div class="sidebar-cards">
+      ${NAV.map((n) => `
+      <button class="nav-item nav-card ${state.view === n.key ? 'active' : ''}" data-view="${n.key}" ${state.projectId ? '' : 'disabled'}>
+        <span class="nav-icon">${n.icon}</span>
+        <span class="nav-label">${n.label}</span>
+        ${state.projectId && counts[n.key] ? `<span class="nav-count">${counts[n.key]}</span>` : ''}
+      </button>`).join('')}
+    </div>`;
 
   sidebarEl().querySelectorAll('.nav-item').forEach((b) => {
     b.addEventListener('click', () => { state.view = b.dataset.view; render(); });

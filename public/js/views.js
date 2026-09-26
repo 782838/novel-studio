@@ -1374,6 +1374,47 @@ function flatOutlineOptions(nodes) {
 /* ==================================================================== 章节 */
 
 /**
+ * 正文字号：全屏写作顶栏的 A－ / A＋ 调节。
+ * 存 localStorage，通过 CSS 变量 --editor-fs 生效（正文编辑区通用，全屏内外都跟手）。
+ */
+const FS_KEY = 'novel-studio:editor-font';
+export const FONT_MIN = 13;
+export const FONT_MAX = 30;
+export const FONT_DEFAULT = 17;
+
+export function editorFontSize() {
+  try {
+    const v = Number(localStorage.getItem(FS_KEY));
+    if (Number.isFinite(v) && v >= FONT_MIN && v <= FONT_MAX) return Math.round(v);
+  } catch (e) { /* 隐私模式等读不到就吃默认值 */ }
+  return FONT_DEFAULT;
+}
+
+export function applyEditorFont(px, persist = true) {
+  const v = Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(Number(px) || FONT_DEFAULT)));
+  if (typeof document !== 'undefined') {
+    document.documentElement.style.setProperty('--editor-fs', `${v}px`);
+    const lab = document.getElementById('fontSizeVal');
+    if (lab) lab.textContent = `${v}px`;
+    document.querySelectorAll('[data-act="font-dec"]').forEach((b) => { b.disabled = v <= FONT_MIN; });
+    document.querySelectorAll('[data-act="font-inc"]').forEach((b) => { b.disabled = v >= FONT_MAX; });
+  }
+  if (persist) { try { localStorage.setItem(FS_KEY, String(v)); } catch (e) { /* 忽略 */ } }
+  return v;
+}
+
+// 模块加载时就把上次存过的字号挂上去，避免打开正文先闪一下默认大小。
+// 没存过就不设变量，交给 CSS 各自的默认值（非全屏 16px / 全屏 17px）。
+if (typeof document !== 'undefined') {
+  try {
+    const saved = Number(localStorage.getItem(FS_KEY));
+    if (Number.isFinite(saved) && saved >= FONT_MIN && saved <= FONT_MAX) {
+      document.documentElement.style.setProperty('--editor-fs', `${Math.round(saved)}px`);
+    }
+  } catch (e) { /* 忽略 */ }
+}
+
+/**
  * 全屏写作模式开关（沉浸写作）。
  * 用 body 上的类 + 固定定位的编辑器实现，不占用系统全屏，Esc 退出（在 app.js 统一监听）。
  */
@@ -1394,13 +1435,19 @@ export function setWritingFull(on) {
 
 const BEAT_STATUS = { idea: '灵感', planned: '已排', done: '已完成' };
 
-/** 章节列表：若存在关联大纲节点（如合并导入的「卷」），按卷分组显示，否则保持平铺 */
-function chapterItemsHtml(list, d, cur) {
+/**
+ * 章节列表：目录栏里的每一个条目统称为「卡片」（.chapter-card）。
+ * 若存在关联大纲节点（如合并导入的「卷」），按卷分组显示，否则保持平铺。
+ */
+function chapterItemsHtml(list, d, cur, labels) {
+  const stName = (s) => (labels && labels[s]) || { todo: '待写', draft: '草稿', done: '完成' }[s] || '';
   const row = (c) => `
-              <div class="chapter-item ${cur && cur.id === c.id ? 'active' : ''}" data-id="${c.id}">
-                <span class="ci-title">${esc(c.title)}</span>
-                <span class="ci-words">${(c.content || '').length}</span>
+              <div class="chapter-item chapter-card ${cur && cur.id === c.id ? 'active' : ''}" data-id="${c.id}" title="${esc(c.title)}">
                 <span class="status-dot s-${esc(c.status)}"></span>
+                <span class="cc-body">
+                  <span class="ci-title">${esc(c.title)}</span>
+                  <span class="cc-meta">${(c.content || '').length} 字 · ${esc(stName(c.status))}</span>
+                </span>
               </div>`;
 
   if (!list.some((c) => c.nodeId)) return list.map(row).join('');
@@ -1429,12 +1476,13 @@ export function chapters(ctx) {
     html: `
       <div class="page editor-view">
         <div class="chapter-list">
-          <div class="chapter-list-head">
-            <b>章节</b>
-            <button class="btn primary xs" data-act="new">＋</button>
+          <div class="chapter-list-head" title="目录：每一章都是一张卡片">
+            <span class="clh-label">目录</span>
+            <span class="clh-count">${list.length} 章</span>
+            <button class="btn primary xs" data-act="new" title="新建章节">＋</button>
           </div>
           <div class="chapter-items">
-            ${list.length ? chapterItemsHtml(list, d, cur) : '<p class="muted small pad">还没有章节</p>'}
+            ${list.length ? chapterItemsHtml(list, d, cur, ctx.meta && ctx.meta.statusLabel) : '<p class="muted small pad">还没有章节</p>'}
           </div>
         </div>
         <div class="chapter-main">
@@ -1515,6 +1563,15 @@ export function chapters(ctx) {
       });
       root.querySelectorAll('[data-act="full"]').forEach((b) => b.addEventListener('click', () => setWritingFull()));
 
+      // 全屏顶栏的 A－ / A＋：改的是 CSS 变量，正文立刻跟手，不用重绘（保住光标）
+      const fsBtns = root.querySelectorAll('[data-act="font-dec"], [data-act="font-inc"]');
+      if (fsBtns.length) {
+        applyEditorFont(editorFontSize(), false);       // 顺带同步显示值与两端禁用态
+        fsBtns.forEach((b) => b.addEventListener('click', () => {
+          applyEditorFont(editorFontSize() + (b.dataset.act === 'font-inc' ? 1 : -1));
+        }));
+      }
+
       root.querySelector('#chapterStatus').addEventListener('change', (e) => c.patch('chapters', cur.id, { status: e.target.value }).then(() => c.syncLocal()));
 
       const nodeSel = root.querySelector('#chapterNode');
@@ -1559,9 +1616,12 @@ export function chapters(ctx) {
         });
       });
 
-      root.querySelector('[data-act="chapter-outline"]').addEventListener('click', () => {
+      const askOutline = () => {
         c.askAI(`为章节「${cur.title}」写一份细纲：分成 3~5 个场景，每个场景说明出场人物、场景目标、冲突点、以及结尾钩子。${cur.summary ? `本章要点：${cur.summary}` : ''}`);
-      });
+      };
+      root.querySelector('[data-act="chapter-outline"]').addEventListener('click', askOutline);
+      const hintOutline = root.querySelector('[data-act="hint-outline"]');
+      if (hintOutline) hintOutline.addEventListener('click', askOutline);
 
       root.querySelector('[data-act="chapter-del"]').addEventListener('click', async () => {
         const sure = await openConfirm({ title: '删除章节', message: `将删除「${cur.title}」的全部正文。`, danger: true, okText: '删除' });
@@ -1576,38 +1636,47 @@ export function chapters(ctx) {
 
 function chapterEditor(cur, d, ctx) {
   const isFull = typeof document !== 'undefined' && document.body.classList.contains('writing-full');
+  const blank = !(cur.content || '').trim();
   return `
     <div class="editor">
       <div class="editor-full-bar">
         <span class="efb-tag">全屏写作</span>
         <span class="efb-title">${esc(cur.title)}</span>
         <span class="word-count" id="fullWords">${(cur.content || '').length} 字</span>
+        <div class="efb-font" title="正文字号">
+          <button class="btn ghost sm" data-act="font-dec" title="缩小字号">A－</button>
+          <span class="font-size-val" id="fontSizeVal">${editorFontSize()}px</span>
+          <button class="btn ghost sm" data-act="font-inc" title="放大字号">A＋</button>
+        </div>
         <button class="btn ghost sm" data-act="full">⛶ 退出全屏（Esc）</button>
       </div>
-      <div class="editor-head">
-        <input class="editor-title" id="chapterTitle" value="${esc(cur.title)}" placeholder="章节标题" />
-        <select id="chapterStatus" class="slim-select">
-          ${[['todo', '待写'], ['draft', '草稿'], ['done', '完成']]
+      <div class="editor-sheet">
+        <div class="editor-head">
+          <input class="editor-title" id="chapterTitle" value="${esc(cur.title)}" placeholder="请输入章节标题" />
+          <select id="chapterStatus" class="slim-select">
+            ${[['todo', '待写'], ['draft', '草稿'], ['done', '完成']]
       .map(([v, l]) => `<option value="${v}" ${cur.status === v ? 'selected' : ''}>${l}</option>`).join('')}
-        </select>
-        <button class="btn ghost sm" data-act="full" title="全屏写作（Esc 退出）">${isFull ? '⛶ 退出全屏' : '⛶ 全屏'}</button>
-        <button class="btn ghost sm danger-text" data-act="chapter-del">删除</button>
-      </div>
-
-      <div class="editor-tools">
-        <button class="btn primary sm" data-act="chapter-ai">✨ AI 续写</button>
-        <button class="btn ghost sm" data-act="chapter-outline">🗂 生成细纲</button>
-        <label class="inline-field"><span>挂靠大纲</span>
-          <select id="chapterNode">
-            <option value="">（无）</option>
-            ${flatOutlineOptions(d.outline).map(([v, l]) => `<option value="${v}" ${cur.nodeId === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}
           </select>
-        </label>
-        <span class="word-count" id="wordCount">${(cur.content || '').length} 字</span>
-      </div>
+          <button class="btn ghost sm" data-act="full" title="全屏写作（Esc 退出）">${isFull ? '⛶ 退出全屏' : '⛶ 全屏'}</button>
+          <button class="btn ghost sm danger-text" data-act="chapter-del">删除</button>
+        </div>
 
-      <textarea id="chapterSummary" class="editor-summary" rows="2" placeholder="本章要点：要推进什么、收束什么、埋什么">${esc(cur.summary || '')}</textarea>
-      <textarea id="chapterContent" class="editor-content" placeholder="从这里开始写……">${esc(cur.content || '')}</textarea>
+        <div class="editor-tools">
+          <button class="btn primary sm" data-act="chapter-ai">✨ AI 续写</button>
+          <button class="btn ghost sm" data-act="chapter-outline">🗂 生成细纲</button>
+          <label class="inline-field"><span>挂靠大纲</span>
+            <select id="chapterNode">
+              <option value="">（无）</option>
+              ${flatOutlineOptions(d.outline).map(([v, l]) => `<option value="${v}" ${cur.nodeId === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+            </select>
+          </label>
+          <span class="word-count" id="wordCount">${(cur.content || '').length} 字</span>
+        </div>
+
+        <textarea id="chapterSummary" class="editor-summary" rows="2" placeholder="本章要点：要推进什么、收束什么、埋什么">${esc(cur.summary || '')}</textarea>
+        ${blank ? `<div class="editor-hint"><span class="eh-icon">✨</span><span>这一章还空着 —— 让 AI 先出一版细纲，或者直接落笔</span><button class="btn ghost xs" data-act="hint-outline">生成细纲</button></div>` : ''}
+        <textarea id="chapterContent" class="editor-content" placeholder="从这里开始写……">${esc(cur.content || '')}</textarea>
+      </div>
     </div>`;
 }
 
